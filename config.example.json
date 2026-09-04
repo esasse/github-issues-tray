@@ -1,0 +1,10 @@
+{
+  "refreshMinutes": 5,
+  "maxItems": 50,
+  "includePullRequests": false,
+  "showLabels": true,
+  "hotkey": "Ctrl+Win+I",
+  "accentColor": "#00A8FF",
+  "popupWidth": 520,
+  "popupMaxHeight": 620
+}
