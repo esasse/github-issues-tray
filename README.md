@@ -17,8 +17,11 @@ list, and clicking an item opens the issue in your browser.
 - **No server in between.** It talks straight to the GitHub API, through `gh`.
 - **Plain PowerShell + WinForms.** No dependencies: no Node, no Electron, no npm.
   About 700 lines of PowerShell and the `gh` CLI.
-- The tray icon is drawn at runtime with the number inside it (grey at zero, red with
-  a `!` when `gh` fails).
+- The tray icon is drawn at runtime, with the count inside it. It has five states:
+  three dots while the first query is still out, blue with the count, grey with the
+  count when a refresh failed but the cached list is still worth showing, grey `0`
+  when you are genuinely clear, and red `!` only when there is nothing to show and
+  something is wrong.
 
 ## Requirements
 
@@ -116,6 +119,10 @@ A failed refresh does not throw away what the app already has. The count stays i
 tray, greyed out instead of blue, the popup header says `could not refresh`, and the
 list keeps showing the last good data with its real age. The red `!` icon is only for
 when there is genuinely nothing to show.
+
+Before the first query comes back there is no count to show yet, and `0` would be a
+lie, so the icon shows three dots instead. That is the only moment it does: during a
+later refresh the number already on screen is truer than a spinner.
 
 Failures retry on their own after 20s, 60s, 120s and 300s before falling back to the
 normal interval, and the app watches its own clock: if the wall clock jumps by more

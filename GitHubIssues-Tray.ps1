@@ -347,7 +347,7 @@ function Set-TrayIcon {
     switch ($Mode) {
         'error'   { $fill = $Theme.Warn;   $text = '!' }
         'zero'    { $fill = $Theme.Zero;   $text = '0' }
-        'loading' { $fill = $Theme.Muted;  $text = '…' }
+        'loading' { $fill = $Theme.Muted;  $text = '' }   # dots are drawn by hand below
         'stale'   {
             # Refresh failed but the cached list is still worth showing: keep the
             # count and grey it out, instead of throwing the number away.
@@ -364,17 +364,44 @@ function Set-TrayIcon {
     $g.FillEllipse($brush, 1, 1, $size - 2, $size - 2)
     $brush.Dispose()
 
-    $ratio = switch ($text.Length) { 1 { 0.60 } 2 { 0.50 } default { 0.38 } }
-    $fontSize = [float]($size * $ratio)
-    $font = New-Object System.Drawing.Font('Segoe UI', $fontSize, [System.Drawing.FontStyle]::Bold, [System.Drawing.GraphicsUnit]::Pixel)
-    $fmt = New-Object System.Drawing.StringFormat
-    $fmt.Alignment = [System.Drawing.StringAlignment]::Center
-    $fmt.LineAlignment = [System.Drawing.StringAlignment]::Center
     $textBrush = New-Object System.Drawing.SolidBrush((Get-ContrastColor $fill))
-    $rect = New-Object System.Drawing.RectangleF(0, 0, $size, $size)
-    $g.DrawString($text, $font, $textBrush, $rect, $fmt)
 
-    $textBrush.Dispose(); $fmt.Dispose(); $font.Dispose(); $g.Dispose()
+    if ($Mode -eq 'loading') {
+        # Three dots drawn by hand rather than the "…" glyph. That glyph is aligned
+        # on the baseline: its box is a full line tall but the ink sits in the
+        # bottom few pixels, so centring the box drops the dots to the floor of the
+        # circle. At a 20px icon that reads as dirt, not as a state.
+        $r = [double]$size * 0.075
+        if ($r -lt 1.0) { $r = 1.0 }
+        $gap = $r * 3.2
+        $c = [double]$size / 2.0
+        foreach ($off in @(-$gap, 0.0, $gap)) {
+            $g.FillEllipse($textBrush, [float]($c + $off - $r), [float]($c - $r), [float]($r * 2), [float]($r * 2))
+        }
+    } else {
+        $ratio = switch ($text.Length) { 1 { 0.60 } 2 { 0.50 } default { 0.38 } }
+        $fontSize = [float]($size * $ratio)
+        $font = New-Object System.Drawing.Font('Segoe UI', $fontSize, [System.Drawing.FontStyle]::Bold, [System.Drawing.GraphicsUnit]::Pixel)
+
+        # A circle is only as wide as $size across its middle, and narrower over the
+        # band the glyphs actually occupy. "99+" came out touching the edge, so shrink
+        # until the drawn box clears it. Never fires for one or two characters.
+        $budget = [float]($size * 0.80)
+        while ($fontSize -gt 5.0 -and $g.MeasureString($text, $font).Width -gt $budget) {
+            $font.Dispose()
+            $fontSize = $fontSize - 0.5
+            $font = New-Object System.Drawing.Font('Segoe UI', $fontSize, [System.Drawing.FontStyle]::Bold, [System.Drawing.GraphicsUnit]::Pixel)
+        }
+
+        $fmt = New-Object System.Drawing.StringFormat
+        $fmt.Alignment = [System.Drawing.StringAlignment]::Center
+        $fmt.LineAlignment = [System.Drawing.StringAlignment]::Center
+        $rect = New-Object System.Drawing.RectangleF(0, 0, $size, $size)
+        $g.DrawString($text, $font, $textBrush, $rect, $fmt)
+        $fmt.Dispose(); $font.Dispose()
+    }
+
+    $textBrush.Dispose(); $g.Dispose()
 
     $handle = $bmp.GetHicon()
     $newIcon = [System.Drawing.Icon]::FromHandle($handle)
@@ -398,6 +425,14 @@ $script:LastError   = $null
 $script:Fetching    = $false
 $script:GhPath      = $null
 $script:RetryCount  = 0
+
+# "Nothing yet" is not the same as "zero". Until the first query comes back the
+# count is unknown, and showing 0 claims an inbox is clear when it may not be.
+# This is the only moment the loading icon is the honest answer: during a later
+# refresh the number already on screen stays truer than a spinner.
+function Test-Loading {
+    return ((-not $script:LastUpdate) -and (-not $script:LastError) -and ($script:AllItems.Count -eq 0))
+}
 
 function Get-VisibleItems {
     $items = @($script:AllItems)
@@ -503,13 +538,9 @@ function Start-Fetch {
         Start-Retry
     }
 
-    if ($script:Fetching) {
-        $script:PollTimer.Start()
-        if ($script:AllItems.Count -eq 0 -and -not $script:LastUpdate) {
-            try { Set-TrayIcon -Count 0 -Mode 'loading' }
-            catch { Write-Log "could not draw the loading icon: $(Format-ErrorText $_.Exception.Message)" }
-        }
-    }
+    if ($script:Fetching) { $script:PollTimer.Start() }
+    # The icon is Update-Ui's business alone. Setting it here as well is what kept
+    # the loading icon invisible: it was drawn and then immediately overwritten.
     Update-Ui
 }
 
@@ -802,7 +833,9 @@ function Update-List {
     } else {
         $List.Visible = $false
         $Empty.Visible = $true
-        $Empty.Text = if ($script:LastError) {
+        $Empty.Text = if (Test-Loading) {
+            'Loading…'
+        } elseif ($script:LastError) {
             # This is the only place with room for the reason; the tooltip cannot hold it.
             $why = Format-ErrorText $script:LastError
             if ($why.Length -gt 160) { $why = $why.Substring(0, 159) + [char]0x2026 }
@@ -844,7 +877,10 @@ function Update-Ui {
     # the error icon when there is genuinely nothing to show. Otherwise keep the
     # count and mark it stale, so a dropped network does not erase the number.
     $stale = [bool]$script:LastError
-    if ($script:LastError -and $count -eq 0) {
+    $loading = Test-Loading
+    if ($loading) {
+        Set-TrayIcon -Count 0 -Mode 'loading'
+    } elseif ($script:LastError -and $count -eq 0) {
         Set-TrayIcon -Count 0 -Mode 'error'
     } elseif ($count -eq 0) {
         Set-TrayIcon -Count 0 -Mode 'zero'
@@ -858,7 +894,9 @@ function Update-Ui {
     # goes to the log, and to the popup when there is nothing left to list.
     $repos = @($items | Select-Object -ExpandProperty repo -Unique).Count
     $word = if ($script:IncludePRs) { 'open' } else { Plural $count 'issue' 'issues' }
-    if ($script:LastError -and $count -eq 0) {
+    if ($loading) {
+        $tip = 'GitHub Issues Tray - loading…'
+    } elseif ($script:LastError -and $count -eq 0) {
         $tip = 'GitHub Issues Tray - refresh failed'
     } else {
         $tip = "GitHub: $count $word"
@@ -877,15 +915,18 @@ function Update-Ui {
     }
     Set-TrayTooltip $tip
 
-    $label = if ($script:IncludePRs) { 'open' } else { Plural $count 'issue' 'issues' }
-    $headerText = "$count $label"
-    if ($repos -gt 0) { $headerText += "  ·  $repos " + (Plural $repos 'repo' 'repos') }
-    if ($script:Fetching) {
-        $headerText += '  ·  refreshing…'
-    } elseif ($script:LastUpdate) {
-        $headerText += '  ·  ' + (Format-Age $script:LastUpdate)
+    if ($loading) {
+        $headerText = 'loading…'
+    } else {
+        $headerText = "$count $word"
+        if ($repos -gt 0) { $headerText += "  ·  $repos " + (Plural $repos 'repo' 'repos') }
+        if ($script:Fetching) {
+            $headerText += '  ·  refreshing…'
+        } elseif ($script:LastUpdate) {
+            $headerText += '  ·  ' + (Format-Age $script:LastUpdate)
+        }
+        if ($stale) { $headerText += '  ·  could not refresh' }
     }
-    if ($stale) { $headerText += '  ·  could not refresh' }
     $HeaderTitle.Text = $headerText
     $HeaderTitle.ForeColor = if ($script:LastError) { $Theme.Warn } else { $Theme.Fore }
 
