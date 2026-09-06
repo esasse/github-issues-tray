@@ -264,18 +264,23 @@ function S {
 function Format-Age {
     param([datetime]$When)
     $span = (Get-Date) - $When.ToLocalTime()
-    $mins = [int]$span.TotalMinutes
-    if ($mins -lt 1)    { return 'now' }
-    if ($mins -lt 60)   { return "$mins" + 'm ago' }
-    $hours = [int]$span.TotalHours
-    if ($hours -lt 24)  { return "$hours" + 'h ago' }
-    $days = [int]$span.TotalDays
-    if ($days -lt 14)   { return "$days" + 'd ago' }
-    $weeks = [int]($days / 7)
-    if ($weeks -lt 9)   { return "$weeks" + 'w ago' }
-    $months = [int]($days / 30)
-    if ($months -lt 24) { return "$months" + 'mo ago' }
-    return "$([int]($days / 365))y ago"
+    # Floor, not [int]: the PowerShell cast rounds to nearest, so 90 seconds read
+    # as "2m ago" and 39 hours as "2d ago". An age should never claim more time
+    # has passed than actually has.
+    $mins = [int][math]::Floor($span.TotalMinutes)
+    if ($mins -lt 1)   { return 'now' }
+    if ($mins -lt 60)  { return "$mins" + 'm ago' }
+    $hours = [int][math]::Floor($span.TotalHours)
+    if ($hours -lt 24) { return "$hours" + 'h ago' }
+    $days = [int][math]::Floor($span.TotalDays)
+    if ($days -lt 14)  { return "$days" + 'd ago' }
+    # Thresholds are all in days on purpose. Written against each unit's own
+    # counter they stop lining up once the counters truncate: "23mo ago" would be
+    # followed a day later by "1y ago", and a months limit of 12 against a years
+    # divisor of 365 yields "0y ago" for five weeks of the year.
+    if ($days -lt 63)  { return "$([int][math]::Floor($span.TotalDays / 7))" + 'w ago' }
+    if ($days -lt 365) { return "$([int][math]::Floor($span.TotalDays / 30))" + 'mo ago' }
+    return "$([int][math]::Floor($span.TotalDays / 365))y ago"
 }
 
 # gh writes multi-line errors ("error connecting to api.github.com\ncheck your
@@ -960,7 +965,18 @@ function Show-Popup {
         Apply-Scale
     }
 
+    # Update-Ui, not just Update-List: the header carries the age of the data
+    # ("3m ago"), and only the one-minute clock recomputed it. Opening the popup
+    # between two ticks showed an age up to a minute out of date - the row ages are
+    # fine either way, since those are formatted while each row is painted.
+    # Update-List runs unconditionally after it. Update-Ui swallows its own errors,
+    # so skipping this when the popup happens to be visible would leave the list
+    # and the height unrebuilt on exactly the path where Update-Ui failed early.
+    # When the popup is closed - which is every real case, since it hides on losing
+    # focus - Update-Ui does not touch the list, so this stays a single rebuild.
+    Update-Ui
     Update-List
+
     $wa = $screen.WorkingArea
     $x = $wa.Right - $Popup.Width - (S 12)
     $y = $wa.Bottom - $Popup.Height - (S 12)
