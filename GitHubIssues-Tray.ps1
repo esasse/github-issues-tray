@@ -278,6 +278,32 @@ function Format-Age {
     return "$([int]($days / 365))y ago"
 }
 
+# gh writes multi-line errors ("error connecting to api.github.com\ncheck your
+# internet connection..."). Left raw, one of those turns a log entry into three
+# lines and makes a mess of the tray tooltip.
+function Format-ErrorText {
+    param([string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return '' }
+    return (($Text -replace '\s+', ' ').Trim())
+}
+
+# NotifyIcon.Text throws ArgumentOutOfRangeException at 64 characters or more -
+# the limit is 63, not the 127 you might expect. An over-long tooltip used to
+# escape as an unhandled exception and put a .NET crash dialog on screen, and the
+# caught message then went back into the error text, making the next tooltip even
+# longer. Keep the tooltip short, clamp it here, and never let it throw.
+$TrayTextMax = 63
+
+function Set-TrayTooltip {
+    param([string]$Text)
+    if ($null -eq $Text) { $Text = '' }
+    if ($Text.Length -gt $TrayTextMax) {
+        $Text = $Text.Substring(0, $TrayTextMax - 1) + '…'
+    }
+    try { $script:Notify.Text = $Text }
+    catch { Write-Log "could not set the tray tooltip: $(Format-ErrorText $_.Exception.Message)" }
+}
+
 function Plural {
     param([int]$N, [string]$One, [string]$Many)
     if ($N -eq 1) { return $One }
@@ -304,7 +330,7 @@ $script:CurrentIconHandle = [IntPtr]::Zero
 function Set-TrayIcon {
     param(
         [int]$Count,
-        [ValidateSet('normal', 'zero', 'error', 'loading')]
+        [ValidateSet('normal', 'zero', 'stale', 'error', 'loading')]
         [string]$Mode = 'normal'
     )
 
@@ -322,6 +348,12 @@ function Set-TrayIcon {
         'error'   { $fill = $Theme.Warn;   $text = '!' }
         'zero'    { $fill = $Theme.Zero;   $text = '0' }
         'loading' { $fill = $Theme.Muted;  $text = '…' }
+        'stale'   {
+            # Refresh failed but the cached list is still worth showing: keep the
+            # count and grey it out, instead of throwing the number away.
+            $fill = $Theme.Zero
+            $text = if ($Count -gt 99) { '99+' } else { [string]$Count }
+        }
         default   {
             $fill = $Theme.Accent
             $text = if ($Count -gt 99) { '99+' } else { [string]$Count }
@@ -365,6 +397,7 @@ $script:LastUpdate  = $null
 $script:LastError   = $null
 $script:Fetching    = $false
 $script:GhPath      = $null
+$script:RetryCount  = 0
 
 function Get-VisibleItems {
     $items = @($script:AllItems)
@@ -450,19 +483,34 @@ function Start-Fetch {
     $fields = 'number,title,url,repository,labels,createdAt,updatedAt'
 
     try {
-        $script:Jobs = @(
-            New-GhJob "search issues --assignee @me --state open --sort updated --order desc --limit $limit --json $fields"
-            New-GhJob "search prs --assignee @me --state open --sort updated --order desc --limit $limit --json $fields,isDraft"
-        )
+        # Record each child as it starts. Built as one array expression, a failure to
+        # launch the second gh throws before anything is assigned, and the first child
+        # is orphaned with its pipes undrained - Stop-Fetch can only reap what it sees.
+        $script:Jobs = @()
+        $script:Jobs += New-GhJob "search issues --assignee @me --state open --sort updated --order desc --limit $limit --json $fields"
+        $script:Jobs += New-GhJob "search prs --assignee @me --state open --sort updated --order desc --limit $limit --json $fields,isDraft"
         $script:Fetching = $true
-        $script:PollTimer.Start()
-        if ($script:AllItems.Count -eq 0 -and -not $script:LastUpdate) { Set-TrayIcon -Count 0 -Mode 'loading' }
-        Update-Ui
     } catch {
-        $script:LastError = "failed to run gh: $($_.Exception.Message)"
+        # Only a failure to LAUNCH gh belongs in here - nothing else runs inside the
+        # try. Keeping Update-Ui (or the icon call below) in it turned any UI error
+        # into a bogus "failed to run gh", and that text then fed straight back into
+        # the next tooltip, making it longer every round. Stop-Fetch reaps the child
+        # that did start when the second one did not.
+        Stop-Fetch
+        $script:LastError = "failed to run gh: $(Format-ErrorText $_.Exception.Message)"
         Write-Log $script:LastError
-        Update-Ui
+        $script:RetryCount++
+        Start-Retry
     }
+
+    if ($script:Fetching) {
+        $script:PollTimer.Start()
+        if ($script:AllItems.Count -eq 0 -and -not $script:LastUpdate) {
+            try { Set-TrayIcon -Count 0 -Mode 'loading' }
+            catch { Write-Log "could not draw the loading icon: $(Format-ErrorText $_.Exception.Message)" }
+        }
+    }
+    Update-Ui
 }
 
 function Convert-GhItem {
@@ -494,7 +542,7 @@ function Complete-Fetch {
         $job.Proc.Dispose()
 
         if ($code -ne 0) {
-            $msg = if ([string]::IsNullOrWhiteSpace($err)) { "gh exited with code $code" } else { $err.Trim() }
+            $msg = if ([string]::IsNullOrWhiteSpace($err)) { "gh exited with code $code" } else { Format-ErrorText $err }
             $errors += $msg
             continue
         }
@@ -503,7 +551,7 @@ function Complete-Fetch {
             $parsed = $out | ConvertFrom-Json
             foreach ($raw in @($parsed)) { $collected += (Convert-GhItem -Raw $raw -IsPR $isPR) }
         } catch {
-            $errors += "invalid response from gh: $($_.Exception.Message)"
+            $errors += "invalid response from gh: $(Format-ErrorText $_.Exception.Message)"
         }
     }
 
@@ -511,10 +559,16 @@ function Complete-Fetch {
     $script:Fetching = $false
 
     if ($errors.Count -gt 0) {
-        $script:LastError = ($errors -join ' | ')
-        Write-Log "fetch error: $($script:LastError)"
+        # both jobs fail with the same message when the network is down; saying it
+        # twice helps nobody
+        $script:LastError = (@($errors | Select-Object -Unique) -join ' | ')
+        $script:RetryCount++
+        Write-Log "fetch error (attempt $($script:RetryCount)): $($script:LastError)"
+        Start-Retry
     } else {
         $script:LastError = $null
+        $script:RetryCount = 0
+        $script:RetryTimer.Stop()
         $script:AllItems = @($collected)
         $script:LastUpdate = Get-Date
         Save-Cache
@@ -749,7 +803,10 @@ function Update-List {
         $List.Visible = $false
         $Empty.Visible = $true
         $Empty.Text = if ($script:LastError) {
-            "Couldn't reach GitHub.`r`nPress R to try again, or L to sign in."
+            # This is the only place with room for the reason; the tooltip cannot hold it.
+            $why = Format-ErrorText $script:LastError
+            if ($why.Length -gt 160) { $why = $why.Substring(0, 159) + [char]0x2026 }
+            "Couldn't reach GitHub.`r`n$why`r`nPress R to try again, or L to sign in."
         } elseif ($script:IncludePRs) {
             'Nothing assigned to you. 🎉'
         } else {
@@ -779,25 +836,46 @@ function Resize-Popup {
 }
 
 function Update-Ui {
+    try {
     $items = Get-VisibleItems
     $count = $items.Count
 
-    if ($script:LastError) {
+    # A failed refresh does not invalidate what we already have: only fall back to
+    # the error icon when there is genuinely nothing to show. Otherwise keep the
+    # count and mark it stale, so a dropped network does not erase the number.
+    $stale = [bool]$script:LastError
+    if ($script:LastError -and $count -eq 0) {
         Set-TrayIcon -Count 0 -Mode 'error'
     } elseif ($count -eq 0) {
         Set-TrayIcon -Count 0 -Mode 'zero'
+    } elseif ($stale) {
+        Set-TrayIcon -Count $count -Mode 'stale'
     } else {
         Set-TrayIcon -Count $count -Mode 'normal'
     }
 
+    # 63 characters total, so the reason for a failure does not fit here: it always
+    # goes to the log, and to the popup when there is nothing left to list.
     $repos = @($items | Select-Object -ExpandProperty repo -Unique).Count
     $word = if ($script:IncludePRs) { 'open' } else { Plural $count 'issue' 'issues' }
-    $tip = "GitHub: $count $word"
-    if ($repos -gt 0) { $tip += " in $repos " + (Plural $repos 'repo' 'repos') }
-    if ($script:LastUpdate) { $tip += "`r`nUpdated " + (Format-Age $script:LastUpdate) }
-    if ($script:LastError) { $tip = "GitHub Issues Tray - error`r`n" + $script:LastError }
-    if ($tip.Length -gt 127) { $tip = $tip.Substring(0, 124) + '...' }
-    $script:Notify.Text = $tip
+    if ($script:LastError -and $count -eq 0) {
+        $tip = 'GitHub Issues Tray - refresh failed'
+    } else {
+        $tip = "GitHub: $count $word"
+        if ($repos -gt 0) { $tip += " in $repos " + (Plural $repos 'repo' 'repos') }
+        if ($stale) {
+            # Has to fit in $TrayTextMax together with the count line above it, or the
+            # clamp in Set-TrayTooltip eats exactly the age this line exists to show.
+            $tip += if ($script:LastUpdate) {
+                "`r`nStale - data from " + (Format-Age $script:LastUpdate)
+            } else {
+                "`r`nRefresh failed"
+            }
+        } elseif ($script:LastUpdate) {
+            $tip += "`r`nUpdated " + (Format-Age $script:LastUpdate)
+        }
+    }
+    Set-TrayTooltip $tip
 
     $label = if ($script:IncludePRs) { 'open' } else { Plural $count 'issue' 'issues' }
     $headerText = "$count $label"
@@ -807,6 +885,7 @@ function Update-Ui {
     } elseif ($script:LastUpdate) {
         $headerText += '  ·  ' + (Format-Age $script:LastUpdate)
     }
+    if ($stale) { $headerText += '  ·  could not refresh' }
     $HeaderTitle.Text = $headerText
     $HeaderTitle.ForeColor = if ($script:LastError) { $Theme.Warn } else { $Theme.Fore }
 
@@ -816,6 +895,11 @@ function Update-Ui {
     $script:MenuIncludePRs.Checked = $script:IncludePRs
 
     if ($Popup.Visible) { Update-List }
+    } catch {
+        # Update-Ui runs from timers; an exception escaping here reaches WinForms
+        # as an unhandled one. Log it and keep the tray alive.
+        Write-Log "error in Update-Ui: $(Format-ErrorText $_.Exception.Message) @ $($_.InvocationInfo.ScriptLineNumber)"
+    }
 }
 
 # ---- position and visibility
@@ -917,7 +1001,7 @@ $Popup.Add_KeyDown({
         ([System.Windows.Forms.Keys]::Enter)  { Open-Selected; $e.Handled = $true; $e.SuppressKeyPress = $true }
         ([System.Windows.Forms.Keys]::C)      { Copy-Selected; $e.Handled = $true }
         ([System.Windows.Forms.Keys]::P)      { Toggle-PullRequests; $e.Handled = $true }
-        ([System.Windows.Forms.Keys]::R)      { Start-Fetch; $e.Handled = $true }
+        ([System.Windows.Forms.Keys]::R)      { $script:RetryCount = 0; Start-Fetch; $e.Handled = $true }
         ([System.Windows.Forms.Keys]::G)      { Open-AssignedPage; $e.Handled = $true }
         ([System.Windows.Forms.Keys]::L)      { Invoke-GhLogin; $e.Handled = $true }
     }
@@ -943,7 +1027,7 @@ $miOpen.Add_Click({ Show-Popup })
 $miOpen.Font = New-Object System.Drawing.Font($Menu.Font, [System.Drawing.FontStyle]::Bold)
 
 $miRefresh = $Menu.Items.Add('Refresh now')
-$miRefresh.Add_Click({ Start-Fetch })
+$miRefresh.Add_Click({ $script:RetryCount = 0; Start-Fetch })
 
 $Menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator)) | Out-Null
 
@@ -1001,10 +1085,16 @@ $script:PollTimer.Add_Tick({
 
     $stale = $script:Jobs | Where-Object { ((Get-Date) - $_.Started).TotalSeconds -gt 60 }
     if ($stale) {
-        Write-Log 'fetch exceeded 60s, cancelling'
         Stop-Fetch
         $script:LastError = 'the GitHub query took too long (timeout)'
         $script:PollTimer.Stop()
+        # A hang is a failure like any other. Without this the timeout is the one
+        # path that skips the backoff, and a gh left hanging by a half-open
+        # connection (exactly the resume-from-sleep case) sits stale for a whole
+        # refresh interval. Stop-Fetch first: Start-Fetch bails while Fetching.
+        $script:RetryCount++
+        Write-Log "fetch exceeded 60s, cancelling (attempt $($script:RetryCount))"
+        Start-Retry
         Update-Ui
         return
     }
@@ -1025,14 +1115,47 @@ $script:RefreshTimer = New-Object System.Windows.Forms.Timer
 $script:RefreshTimer.Interval = [int]$script:Config.refreshMinutes * 60000
 $script:RefreshTimer.Add_Tick({ Start-Fetch })
 
+# Waiting the full refresh interval after a failure is what leaves a stale icon
+# sitting there for minutes: the usual cause is a resume from sleep, where the
+# network comes up seconds later. Retry sooner, backing off.
+$script:RetryDelays = @(20, 60, 120, 300)
+
+$script:RetryTimer = New-Object System.Windows.Forms.Timer
+$script:RetryTimer.Add_Tick({
+    $script:RetryTimer.Stop()
+    Start-Fetch
+})
+
+function Start-Retry {
+    if ($script:RetryCount -lt 1 -or $script:RetryCount -gt $script:RetryDelays.Count) { return }
+    $delay = $script:RetryDelays[$script:RetryCount - 1]
+    $script:RetryTimer.Stop()
+    $script:RetryTimer.Interval = $delay * 1000
+    $script:RetryTimer.Start()
+    Write-Log "retrying in ${delay}s"
+}
+
 # one-minute clock: keeps the "Xm ago" in the tooltip/header current
 $script:ClockTimer = New-Object System.Windows.Forms.Timer
 $script:ClockTimer.Interval = 60000
+$script:LastTick = Get-Date
+
 $script:ClockTimer.Add_Tick({
-    if ($script:LastUpdate) {
-        $tip = $script:Notify.Text
-        Update-Ui
+    # A WinForms timer does not fire while the machine is suspended, so a jump in
+    # the wall clock means we just came back from sleep. The scheduled refresh can
+    # be minutes away and the data is already hours old, so ask for it now.
+    # A large clock correction (NTP, or a dual-boot machine disagreeing with the
+    # RTC) trips this too. That is fine: the cost of a false positive is one extra
+    # query, and the cost of missing a real resume is a stale count for minutes.
+    $now = Get-Date
+    if (($now - $script:LastTick).TotalSeconds -gt 180) {
+        Write-Log "clock jumped $([int](($now - $script:LastTick).TotalMinutes))min (resume from sleep); refreshing"
+        $script:RetryCount = 0
+        Start-Fetch
     }
+    $script:LastTick = $now
+
+    if ($script:LastUpdate) { Update-Ui }
 })
 
 # ----------------------------------------------------------------- hotkey ---
@@ -1102,6 +1225,13 @@ if ($ShowOnStart) {
     $bootTimer.Start()
 }
 
+# Last line of defence: a tray app that lives for days must never answer a bug
+# with a modal .NET crash dialog. Log it and stay up.
+[System.Windows.Forms.Application]::add_ThreadException({
+    param($sender, $e)
+    try { Write-Log "unhandled UI exception: $(Format-ErrorText $e.Exception.ToString())" } catch { }
+})
+
 $AppContext = New-Object System.Windows.Forms.ApplicationContext
 try {
     [System.Windows.Forms.Application]::Run($AppContext)
@@ -1110,6 +1240,7 @@ try {
     $script:RefreshTimer.Stop()
     $script:ClockTimer.Stop()
     $script:PollTimer.Stop()
+    $script:RetryTimer.Stop()
     if ($script:Hotkey) { $script:Hotkey.Dispose() }
     $script:Notify.Visible = $false
     $script:Notify.Dispose()

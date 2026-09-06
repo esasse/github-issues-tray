@@ -110,9 +110,22 @@ program, the app notes it in the log and starts normally, just without the hotke
 The cache exists so the list is already populated the moment the app comes up, before
 the first query finishes.
 
+## When a refresh fails
+
+A failed refresh does not throw away what the app already has. The count stays in the
+tray, greyed out instead of blue, the popup header says `could not refresh`, and the
+list keeps showing the last good data with its real age. The red `!` icon is only for
+when there is genuinely nothing to show.
+
+Failures retry on their own after 20s, 60s, 120s and 300s before falling back to the
+normal interval, and the app watches its own clock: if the wall clock jumps by more
+than three minutes, the machine was suspended, so it refreshes immediately instead of
+waiting for the next tick. Between them, those two cover the common case by far — a
+laptop waking up with the network a few seconds behind it.
+
 ## Implementation notes
 
-Four things that are not obvious and that break if changed carelessly:
+Five things that are not obvious and that break if changed carelessly:
 
 1. **The `.ps1` must be saved as UTF-8 _with_ BOM.** Without the BOM, Windows
    PowerShell 5.1 reads the file as ANSI (cp1252) and every non-ASCII literal — the
@@ -133,6 +146,18 @@ Four things that are not obvious and that break if changed carelessly:
    `Font.GetHeight()` measured at the current DPI — a fixed constant makes the text
    overlap at 150%. When the popup opens on a monitor with a different scale,
    `Show-Popup` re-reads the DPI and rebuilds the layout.
+
+5. **`NotifyIcon.Text` is limited to 63 characters, and throws above that.** Not 127,
+   which is the number the .NET source suggests if you skim it —
+   `ArgumentOutOfRangeException: Text length must be less than 64 characters long`.
+   Because the tooltip is set from a timer callback, an over-long one escaped as an
+   unhandled exception and put a modal .NET crash dialog on screen; the caught message
+   then went back into the error text and made the next tooltip longer still. The
+   tooltip is now built to be short by design, clamped in `Set-TrayTooltip`, and the
+   reason for a failure always goes to the log, and to the popup when there is
+   nothing left to list — both have room for it.
+   `Application.ThreadException` is handled too, so no bug in a callback can put a
+   dialog in front of the user again.
 
 Fetching does not block the UI: `gh` runs in two child processes whose output is
 drained by `ReadToEndAsync()` (avoiding the classic full-pipe deadlock), and a 250 ms
