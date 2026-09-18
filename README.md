@@ -61,16 +61,35 @@ To uninstall: `powershell -ExecutionPolicy Bypass -File .\Install-Autostart.ps1 
 |---|---|
 | `↑` `↓` | move |
 | `Enter` or left click | open the issue in the browser |
+| `/` or `Ctrl+F` | search |
 | `C` or middle click | copy the link |
 | `P` | include/exclude pull requests |
 | `R` | refresh now |
 | `G` | open github.com/issues/assigned |
 | `L` | run `gh auth login` |
-| `Esc` | close |
+| `Esc` | clear the search, or close |
 
 Each row shows a colour bar for the repository (derived from its name, so it is stable
 across runs), `owner/repo #number`, the title, the labels in their real GitHub colours,
 and how long ago the issue was updated.
+
+**Search**
+
+`/` or `Ctrl+F` opens a bar under the header and the list narrows as you type. A term
+matches anywhere in the title, the repository, the number or a label name, case
+insensitive, so `4814`, `#4814`, `monde/api` and `bug` all work. Several terms are
+ANDed and their order does not matter: `web mig` keeps only the rows that match both.
+Open pull requests, when they are being shown, also answer to `pr` and `draft`.
+
+`↑` `↓` and `Enter` keep working while you type, so you never have to leave the box to
+reach the row you were looking for. The header counts what survived the filter
+(`22 issues · 3 repos · now · 3 matching`). `Esc` clears the search and leaves the list
+open; a second `Esc` closes the popup.
+
+The filter is a view over the list and nothing else. The tray count and the tooltip go
+on answering “how much is assigned to me”, because that is the number the icon exists
+for, and the search is forgotten when the popup closes — reopening it to a silent
+subset would be worse than typing the two letters again.
 
 ## Configuration
 
@@ -132,7 +151,7 @@ laptop waking up with the network a few seconds behind it.
 
 ## Implementation notes
 
-Five things that are not obvious and that break if changed carelessly:
+Six things that are not obvious and that break if changed carelessly:
 
 1. **The `.ps1` must be saved as UTF-8 _with_ BOM.** Without the BOM, Windows
    PowerShell 5.1 reads the file as ANSI (cp1252) and every non-ASCII literal — the
@@ -165,6 +184,14 @@ Five things that are not obvious and that break if changed carelessly:
    nothing left to list — both have room for it.
    `Application.ThreadException` is handled too, so no bug in a callback can put a
    dialog in front of the user again.
+6. **Every call to `Get-VisibleItems` / `Get-FilteredItems` has to be wrapped in
+   `@()`.** PowerShell unrolls an array on the way out of a function, so a single
+   result comes back as a bare object — and `.Count` on one of those is `$null` in
+   5.1, not `1`. Unwrapped, exactly one assigned issue rendered as “` issues`” with no
+   number in front of it and left middle-click-opens-the-newest doing nothing, and
+   the search header read “` matching`” whenever a filter came down to one row.
+   Returning `,$items` instead is not the fix it looks like: `@()` around such a
+   return nests the array one level deeper, which is the same bug wearing a hat.
 
 Fetching does not block the UI: `gh` runs in two child processes whose output is
 drained by `ReadToEndAsync()` (avoiding the classic full-pipe deadlock), and a 250 ms
