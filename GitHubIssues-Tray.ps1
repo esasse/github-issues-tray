@@ -1235,7 +1235,11 @@ function Move-Selection {
 function Show-Search {
     if (-not $Popup.Visible) { return }
     if ($script:SearchOpen) {
-        # “/” on an open search means “start over”, not a literal slash to filter by.
+        # Reached from Ctrl+F, or from “/” with the focus somewhere other than the box:
+        # put the cursor back and select what is there, so the next keystroke starts a
+        # new filter. “/” typed INTO the box is a literal slash on purpose - repository
+        # names carry one, and “monde/api” is a search the README promises works. Ctrl+F
+        # is the way to start over without leaving the keyboard.
         $SearchBox.Focus() | Out-Null
         $SearchBox.SelectAll()
         return
@@ -1322,6 +1326,8 @@ $Popup.Add_KeyDown({
 # type-ahead would otherwise try to match it against the rows.
 $Popup.Add_KeyPress({
     param($sender, $e)
+    # Not a missing case: with the box focused, “/” is text. Intercepting it here would
+    # make “monde/api” untypable, and Ctrl+F already restarts the search from inside.
     if ($script:SearchOpen -and $SearchBox.Focused) { return }
     if ([string]$e.KeyChar -eq '/') {
         Show-Search
