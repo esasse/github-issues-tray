@@ -431,6 +431,16 @@ $script:Fetching    = $false
 $script:GhPath      = $null
 $script:RetryCount  = 0
 
+# The search filter narrows the popup list and nothing else. It is deliberately
+# kept out of Get-VisibleItems: the icon and the tooltip answer “how much is
+# assigned to me”, and a filter must never be able to make that number look
+# better than it is.
+$script:Filter        = ''
+$script:SearchOpen    = $false
+$script:MatchCount    = 0
+$script:SuspendSearch = $false   # set while the box is cleared in code
+$script:HeaderBase    = ''       # header without the “N matching” suffix
+
 # "Nothing yet" is not the same as "zero". Until the first query comes back the
 # count is unknown, and showing 0 claims an inbox is clear when it may not be.
 # This is the only moment the loading icon is the honest answer: during a later
@@ -448,7 +458,47 @@ function Get-VisibleItems {
     if ($items.Count -gt [int]$script:Config.maxItems) {
         $items = @($items[0..([int]$script:Config.maxItems - 1)])
     }
+    # Callers must wrap this in @(). PowerShell unrolls the array on the way out, so a
+    # single result arrives as a bare object, and .Count on one of those is $null on
+    # 5.1 - which is how exactly one assigned issue rendered as " issues" with no number
+    # in front of it, and left middle-click-opens-the-newest doing nothing. Returning
+    # ",$items" instead would not help: @() around such a return nests it one deeper.
     return $items
+}
+
+# Terms are ANDed and matched anywhere, so “mon api” finds an issue in monde/api
+# as readily as one titled “API” in monde/web, and the order you type them in does
+# not matter. The haystack carries the number with its “#” so both “#412” and
+# “412” hit.
+function Test-ItemMatch {
+    param($Item, [string[]]$Terms)
+    $hay = "$($Item.repo) #$($Item.number) $($Item.title)"
+    if ($Item.isPR) {
+        $hay += ' pr'
+        if ($Item.isDraft) { $hay += ' draft' }
+    }
+    if ($Item.labels) {
+        foreach ($lb in $Item.labels) { $hay += ' ' + $lb.name }
+    }
+    $hay = $hay.ToLowerInvariant()
+    foreach ($t in $Terms) {
+        # Ordinal, not the default culture-sensitive IndexOf: word sort gives hyphens
+        # and apostrophes almost no weight, so “email” would hit a title reading
+        # “e-mail” and vice versa, and a term made only of ignorable characters would
+        # match every row. Both sides are already lowercased, so there is nothing for
+        # a culture to add here - and it is the comparison being run per keystroke.
+        if ($hay.IndexOf($t, [System.StringComparison]::Ordinal) -lt 0) { return $false }
+    }
+    return $true
+}
+
+# Same contract as Get-VisibleItems: wrap the result in @().
+function Get-FilteredItems {
+    $items = @(Get-VisibleItems)
+    if ([string]::IsNullOrWhiteSpace($script:Filter)) { return $items }
+    $terms = @($script:Filter.ToLowerInvariant() -split '\s+' | Where-Object { $_ })
+    if ($terms.Count -eq 0) { return $items }
+    return @($items | Where-Object { Test-ItemMatch -Item $_ -Terms $terms })
 }
 
 function Save-Cache {
@@ -683,8 +733,80 @@ $Empty.Font = $FontTitle
 $Empty.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
 $Empty.Visible = $false
 
+# ---- search bar
+
+# Hidden until “/” or Ctrl+F. It docks between the header and the list, so opening
+# it pushes the rows down instead of covering them, and Resize-Popup pays for the
+# extra height.
+$SearchPanel = New-Object System.Windows.Forms.Panel
+$SearchPanel.Dock = [System.Windows.Forms.DockStyle]::Top
+$SearchPanel.Height = S 36
+$SearchPanel.BackColor = $Theme.BackAlt
+$SearchPanel.Visible = $false
+$SearchPanel.Padding = New-Object System.Windows.Forms.Padding((S 14), (S 8), (S 14), (S 8))
+
+$SearchIcon = New-Object System.Windows.Forms.Label
+$SearchIcon.Dock = [System.Windows.Forms.DockStyle]::Left
+$SearchIcon.AutoSize = $false
+$SearchIcon.Width = S 18
+$SearchIcon.Text = '/'
+$SearchIcon.Font = $FontRepo
+$SearchIcon.ForeColor = $Theme.Accent
+$SearchIcon.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+
+$SearchBox = New-Object System.Windows.Forms.TextBox
+$SearchBox.Dock = [System.Windows.Forms.DockStyle]::Fill
+$SearchBox.BorderStyle = [System.Windows.Forms.BorderStyle]::None
+$SearchBox.BackColor = $Theme.BackAlt
+$SearchBox.ForeColor = $Theme.Fore
+$SearchBox.Font = $FontTitle
+# Multiline is the only way a TextBox keeps the height the panel gives it: a
+# single-line one snaps back to the font's own height and sits against the top of
+# the bar. Enter never reaches the box (the popup suppresses it), so nothing wraps.
+$SearchBox.Multiline = $true
+$SearchBox.AcceptsReturn = $false
+
+# An empty bar with a caret in it does not say what it filters. There is no cue
+# banner to lean on - EM_SETCUEBANNER ignores a multiline edit - so the hint is its
+# own label, parked on the right and dropped as soon as there is text to read.
+$SearchHint = New-Object System.Windows.Forms.Label
+$SearchHint.Dock = [System.Windows.Forms.DockStyle]::Right
+$SearchHint.AutoSize = $false
+$SearchHint.Width = S 150
+$SearchHint.Text = 'title, repo, #number, label'
+$SearchHint.Font = $FontMeta
+$SearchHint.ForeColor = $Theme.Zero
+$SearchHint.TextAlign = [System.Drawing.ContentAlignment]::MiddleRight
+
+$SearchPanel.Controls.Add($SearchBox)
+$SearchPanel.Controls.Add($SearchIcon)
+$SearchPanel.Controls.Add($SearchHint)
+
+# a hairline under the bar, so the filter reads as part of the header
+$SearchPanel.Add_Paint({
+    param($sender, $e)
+    $pen = New-Object System.Drawing.Pen($Theme.Border)
+    $y = $SearchPanel.Height - 1
+    $e.Graphics.DrawLine($pen, 0, $y, $SearchPanel.Width, $y)
+    $pen.Dispose()
+})
+
+$SearchBox.Add_TextChanged({
+    if ($script:SuspendSearch) { return }
+    $script:Filter = $SearchBox.Text.Trim()
+    $SearchHint.Visible = ($SearchBox.Text.Length -eq 0)
+    Update-List
+    # Narrowing the list invalidates wherever the cursor was. Put it on the first
+    # match - the most recently updated one - rather than on whatever row the old
+    # index now happens to point at.
+    if ($List.Items.Count -gt 0) { $List.SelectedIndex = 0 }
+})
+
+# Docking runs from the highest index down, so the search bar has to sit below the
+# header and above the list in this collection for it to land there on screen.
 $Popup.Controls.Add($List)
 $Popup.Controls.Add($Empty)
+$Popup.Controls.Add($SearchPanel)
 $Popup.Controls.Add($Header)
 $Popup.Controls.Add($Footer)
 
@@ -726,6 +848,10 @@ function Apply-Scale {
     $Popup.MinimumSize = New-Object System.Drawing.Size((S $script:Config.popupWidth), (S 120))
     $Header.Height = S 44
     $Footer.Height = S 30
+    $SearchPanel.Height = S 36
+    $SearchPanel.Padding = New-Object System.Windows.Forms.Padding((S 14), (S 8), (S 14), (S 8))
+    $SearchIcon.Width = S 18
+    $SearchHint.Width = S 150
     $HeaderTitle.Padding = New-Object System.Windows.Forms.Padding((S 14), 0, (S 14), 0)
     $FooterLabel.Padding = New-Object System.Windows.Forms.Padding((S 14), 0, (S 14), 0)
 }
@@ -823,15 +949,25 @@ $List.Add_DrawItem({
 # ---- list assembly
 
 function Update-List {
-    $items = Get-VisibleItems
-    $previous = $List.SelectedIndex
+    $items = @(Get-FilteredItems)
+    $script:MatchCount = $items.Count
+    # Keep the highlight on the issue, not on the row number. Every rebuild can move
+    # rows under it - a filter, Esc clearing one, P folding the PRs back in, a refresh
+    # that re-sorts by updated - and an index kept across that leaves the highlight on
+    # a different issue, which is the one Enter then opens.
+    $previousUrl = if ($List.SelectedIndex -ge 0) { $List.Items[$List.SelectedIndex].url } else { $null }
     $List.BeginUpdate()
     $List.Items.Clear()
     foreach ($i in $items) { $List.Items.Add($i) | Out-Null }
     $List.EndUpdate()
 
     if ($List.Items.Count -gt 0) {
-        $idx = if ($previous -ge 0 -and $previous -lt $List.Items.Count) { $previous } else { 0 }
+        $idx = 0
+        if ($previousUrl) {
+            for ($i = 0; $i -lt $List.Items.Count; $i++) {
+                if ($List.Items[$i].url -eq $previousUrl) { $idx = $i; break }
+            }
+        }
         $List.SelectedIndex = $idx
         $List.Visible = $true
         $Empty.Visible = $false
@@ -845,6 +981,10 @@ function Update-List {
             $why = Format-ErrorText $script:LastError
             if ($why.Length -gt 160) { $why = $why.Substring(0, 159) + [char]0x2026 }
             "Couldn't reach GitHub.`r`n$why`r`nPress R to try again, or L to sign in."
+        } elseif ($script:Filter) {
+            # Ahead of the two below on purpose: with a filter on, “nothing assigned to
+            # you” would be a lie about the list, not just about the search.
+            "Nothing matches '$($script:Filter)'.`r`nPress Esc to clear the search."
         } elseif ($script:IncludePRs) {
             'Nothing assigned to you. 🎉'
         } else {
@@ -853,6 +993,7 @@ function Update-List {
     }
     $Popup.Controls.SetChildIndex($List, 0)
     $Popup.Controls.SetChildIndex($Empty, 0)
+    Set-HeaderText
     Resize-Popup
 }
 
@@ -863,6 +1004,7 @@ function Resize-Popup {
     }
     if ($List.Items.Count -eq 0) { $rows = S 90 }
     $target = $Header.Height + $Footer.Height + $rows + (S 8)
+    if ($SearchPanel.Visible) { $target += $SearchPanel.Height }
     $max = S $script:Config.popupMaxHeight
     # popupMaxHeight scales too, so on a high-scale display it can exceed the work
     # area and push the footer (the shortcuts) behind the taskbar.
@@ -870,12 +1012,42 @@ function Resize-Popup {
     if ($fit -gt 0 -and $max -gt $fit) { $max = $fit }
     if ($target -gt $max) { $target = $max }
     if ($target -lt (S 160)) { $target = S 160 }
+    if ($Popup.Height -eq $target) { return }
     $Popup.Height = $target
+    # The popup is placed by its top-left corner but belongs to the bottom-right one,
+    # so a height change while it is on screen has to put it back. Opening the search
+    # bar adds 36px and would otherwise push the footer - the line that says how to
+    # get out of the search - behind the taskbar; Esc on a filter narrowed to one row
+    # grows it back by hundreds of pixels and would push most of the list off the
+    # bottom of the screen. While it is hidden there is nothing to move: Show-Popup
+    # positions it against whatever height it ends up with.
+    if ($Popup.Visible) { Set-PopupPosition ([System.Windows.Forms.Screen]::FromControl($Popup)) }
+}
+
+# The filter goes in the header, not the footer: while you type it is the one line
+# that can say how much of the list you are still looking at. $script:HeaderBase is
+# what Update-Ui computed; the suffix is re-applied on every keystroke, from
+# Update-List, without recomputing the rest.
+function Set-HeaderText {
+    $text = $script:HeaderBase
+    if ($script:Filter) { $text += '  ·  ' + $script:MatchCount + ' matching' }
+    $HeaderTitle.Text = $text
+}
+
+function Set-FooterText {
+    if ($script:SearchOpen) {
+        # The letter shortcuts are all typing while the box has focus, so listing them
+        # here would be an invitation to a surprise.
+        $FooterLabel.Text = '↑↓ navigate  Enter open  Esc clear search'
+    } else {
+        $prState = if ($script:IncludePRs) { 'with PRs' } else { 'no PRs' }
+        $FooterLabel.Text = "↑↓ navigate  Enter open  / search  C copy  P $prState  R refresh  G github  Esc close"
+    }
 }
 
 function Update-Ui {
     try {
-    $items = Get-VisibleItems
+    $items = @(Get-VisibleItems)
     $count = $items.Count
 
     # A failed refresh does not invalidate what we already have: only fall back to
@@ -932,11 +1104,11 @@ function Update-Ui {
         }
         if ($stale) { $headerText += '  ·  could not refresh' }
     }
-    $HeaderTitle.Text = $headerText
+    $script:HeaderBase = $headerText
+    Set-HeaderText
     $HeaderTitle.ForeColor = if ($script:LastError) { $Theme.Warn } else { $Theme.Fore }
 
-    $prState = if ($script:IncludePRs) { 'with PRs' } else { 'no PRs' }
-    $FooterLabel.Text = "↑↓ navigate   Enter open   C copy   P $prState   R refresh   G github   Esc close"
+    Set-FooterText
 
     $script:MenuIncludePRs.Checked = $script:IncludePRs
 
@@ -951,6 +1123,18 @@ function Update-Ui {
 # ---- position and visibility
 
 $script:LastHideTicks = 0
+
+# Bottom-right of the work area, inset by the same gap on both sides. Shared with
+# Resize-Popup, which has to redo this every time the height moves.
+function Set-PopupPosition {
+    param($Screen)
+    $wa = $Screen.WorkingArea
+    $x = $wa.Right - $Popup.Width - (S 12)
+    $y = $wa.Bottom - $Popup.Height - (S 12)
+    if ($x -lt $wa.Left) { $x = $wa.Left }
+    if ($y -lt $wa.Top) { $y = $wa.Top }
+    $Popup.Location = New-Object System.Drawing.Point($x, $y)
+}
 
 function Show-Popup {
     try {
@@ -977,12 +1161,7 @@ function Show-Popup {
     Update-Ui
     Update-List
 
-    $wa = $screen.WorkingArea
-    $x = $wa.Right - $Popup.Width - (S 12)
-    $y = $wa.Bottom - $Popup.Height - (S 12)
-    if ($x -lt $wa.Left) { $x = $wa.Left }
-    if ($y -lt $wa.Top) { $y = $wa.Top }
-    $Popup.Location = New-Object System.Drawing.Point($x, $y)
+    Set-PopupPosition $screen
     $Popup.Show()
     $Popup.Activate()
     [TrayNative]::SetForegroundWindow($Popup.Handle) | Out-Null
@@ -994,6 +1173,10 @@ function Hide-Popup {
     if ($Popup.Visible) {
         $script:LastHideTicks = [Environment]::TickCount
         $Popup.Hide()
+        # A filter belongs to this visit to the list, not the next one: left set, the
+        # popup would reopen showing a subset with no visible reason why. Hidden first,
+        # so the rebuild Hide-Search triggers does not flash a resize on the way out.
+        Hide-Search
     }
 }
 
@@ -1040,6 +1223,48 @@ function Toggle-PullRequests {
     if ($Popup.Visible) { Update-List }
 }
 
+function Move-Selection {
+    param([int]$Delta)
+    if ($List.Items.Count -eq 0) { return }
+    $idx = $List.SelectedIndex + $Delta
+    if ($idx -lt 0) { $idx = 0 }
+    if ($idx -ge $List.Items.Count) { $idx = $List.Items.Count - 1 }
+    $List.SelectedIndex = $idx
+}
+
+function Show-Search {
+    if (-not $Popup.Visible) { return }
+    if ($script:SearchOpen) {
+        # “/” on an open search means “start over”, not a literal slash to filter by.
+        $SearchBox.Focus() | Out-Null
+        $SearchBox.SelectAll()
+        return
+    }
+    $script:SearchOpen = $true
+    $script:Filter = ''
+    $script:SuspendSearch = $true
+    $SearchBox.Text = ''
+    $script:SuspendSearch = $false
+    $SearchHint.Visible = $true
+    $SearchPanel.Visible = $true
+    Update-List
+    Set-FooterText
+    $SearchBox.Focus() | Out-Null
+}
+
+function Hide-Search {
+    if (-not $script:SearchOpen) { return }
+    $script:SearchOpen = $false
+    $script:Filter = ''
+    $script:SuspendSearch = $true
+    $SearchBox.Text = ''
+    $script:SuspendSearch = $false
+    $SearchPanel.Visible = $false
+    Update-List
+    Set-FooterText
+    if ($Popup.Visible) { $List.Focus() | Out-Null }
+}
+
 function Open-AssignedPage { Hide-Popup; Open-Url 'https://github.com/issues/assigned' }
 
 function Invoke-GhLogin {
@@ -1053,14 +1278,54 @@ function Invoke-GhLogin {
 
 $Popup.Add_KeyDown({
     param($sender, $e)
+
+    if ($e.Control -and $e.KeyCode -eq [System.Windows.Forms.Keys]::F) {
+        Show-Search
+        $e.Handled = $true; $e.SuppressKeyPress = $true
+        return
+    }
+
+    # With the box focused every other key is text being typed, so only navigation is
+    # taken here: left to the switch below, filtering for “pr” would toggle pull
+    # requests and then refresh.
+    if ($script:SearchOpen -and $SearchBox.Focused) {
+        switch ($e.KeyCode) {
+            ([System.Windows.Forms.Keys]::Escape)   { Hide-Search;              $e.Handled = $true; $e.SuppressKeyPress = $true }
+            ([System.Windows.Forms.Keys]::Enter)    { Open-Selected;            $e.Handled = $true; $e.SuppressKeyPress = $true }
+            ([System.Windows.Forms.Keys]::Up)       { Move-Selection -Delta -1; $e.Handled = $true; $e.SuppressKeyPress = $true }
+            ([System.Windows.Forms.Keys]::Down)     { Move-Selection -Delta 1;  $e.Handled = $true; $e.SuppressKeyPress = $true }
+            ([System.Windows.Forms.Keys]::PageUp)   { Move-Selection -Delta -5; $e.Handled = $true; $e.SuppressKeyPress = $true }
+            ([System.Windows.Forms.Keys]::PageDown) { Move-Selection -Delta 5;  $e.Handled = $true; $e.SuppressKeyPress = $true }
+        }
+        return
+    }
+
     switch ($e.KeyCode) {
-        ([System.Windows.Forms.Keys]::Escape) { Hide-Popup; $e.Handled = $true }
+        ([System.Windows.Forms.Keys]::Escape) {
+            # Esc backs out one step at a time: the filter first, the popup after.
+            if ($script:SearchOpen) { Hide-Search } else { Hide-Popup }
+            $e.Handled = $true
+        }
         ([System.Windows.Forms.Keys]::Enter)  { Open-Selected; $e.Handled = $true; $e.SuppressKeyPress = $true }
         ([System.Windows.Forms.Keys]::C)      { Copy-Selected; $e.Handled = $true }
         ([System.Windows.Forms.Keys]::P)      { Toggle-PullRequests; $e.Handled = $true }
         ([System.Windows.Forms.Keys]::R)      { $script:RetryCount = 0; Start-Fetch; $e.Handled = $true }
         ([System.Windows.Forms.Keys]::G)      { Open-AssignedPage; $e.Handled = $true }
         ([System.Windows.Forms.Keys]::L)      { Invoke-GhLogin; $e.Handled = $true }
+    }
+})
+
+# “/” is read as a character, not as a key code: the virtual key behind it moves with
+# the layout - VK_OEM_2 on a US keyboard, VK_ABNT_C1 on the Brazilian ABNT2 - and
+# matching on the code would open the search on one keyboard and do nothing on the
+# other. Handled here, it is also kept from reaching the ListBox, whose own
+# type-ahead would otherwise try to match it against the rows.
+$Popup.Add_KeyPress({
+    param($sender, $e)
+    if ($script:SearchOpen -and $SearchBox.Focused) { return }
+    if ([string]$e.KeyChar -eq '/') {
+        Show-Search
+        $e.Handled = $true
     }
 })
 
@@ -1128,7 +1393,7 @@ $script:Notify.Add_MouseClick({
     if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
         Toggle-Popup
     } elseif ($e.Button -eq [System.Windows.Forms.MouseButtons]::Middle) {
-        $items = Get-VisibleItems
+        $items = @(Get-VisibleItems)
         if ($items.Count -gt 0) { Open-Url $items[0].url }
     }
 })
