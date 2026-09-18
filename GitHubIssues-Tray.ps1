@@ -1005,10 +1005,23 @@ function Resize-Popup {
     if ($List.Items.Count -eq 0) { $rows = S 90 }
     $target = $Header.Height + $Footer.Height + $rows + (S 8)
     if ($SearchPanel.Visible) { $target += $SearchPanel.Height }
+    # One screen answers both questions below - how tall this may be, and where it
+    # then goes. Read from two different screens they disagree: clamp the height to a
+    # tall monitor the cursor happens to be on, re-anchor to the shorter one the popup
+    # is actually on, and the footer lands behind the taskbar. They could only differ
+    # once the search bar started resizing a popup that is already on screen. While it
+    # is hidden the cursor's screen is the right guess: Show-Popup is about to open it
+    # there, and positions it against that same work area.
+    $screen = if ($Popup.Visible) {
+        [System.Windows.Forms.Screen]::FromControl($Popup)
+    } else {
+        [System.Windows.Forms.Screen]::FromPoint([System.Windows.Forms.Cursor]::Position)
+    }
+
     $max = S $script:Config.popupMaxHeight
     # popupMaxHeight scales too, so on a high-scale display it can exceed the work
     # area and push the footer (the shortcuts) behind the taskbar.
-    $fit = [System.Windows.Forms.Screen]::FromPoint([System.Windows.Forms.Cursor]::Position).WorkingArea.Height - (S 24)
+    $fit = $screen.WorkingArea.Height - (S 24)
     if ($fit -gt 0 -and $max -gt $fit) { $max = $fit }
     if ($target -gt $max) { $target = $max }
     if ($target -lt (S 160)) { $target = S 160 }
@@ -1021,7 +1034,7 @@ function Resize-Popup {
     # grows it back by hundreds of pixels and would push most of the list off the
     # bottom of the screen. While it is hidden there is nothing to move: Show-Popup
     # positions it against whatever height it ends up with.
-    if ($Popup.Visible) { Set-PopupPosition ([System.Windows.Forms.Screen]::FromControl($Popup)) }
+    if ($Popup.Visible) { Set-PopupPosition $screen }
 }
 
 # The filter goes in the header, not the footer: while you type it is the one line
