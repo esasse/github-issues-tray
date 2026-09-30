@@ -1,11 +1,11 @@
 # GitHub Issues Tray
 
-The GitHub issues assigned to you, counted in the Windows tray.
+The GitHub issues and pull requests assigned to you, counted in the Windows tray.
 
 A Windows port of the [omarchy-issues](https://ericksasse.com/omarchy-issues/) plugin:
-the tray icon shows how many open issues are assigned to you — plus the pull requests
-waiting on your review — one click opens the list, and clicking an item opens it in
-your browser.
+the tray icon shows how many open issues and pull requests are assigned to you — plus
+the pull requests waiting on your review — one click opens the list, and clicking an
+item opens it in your browser.
 
 ![the popup list](docs/popup.png)
 
@@ -95,7 +95,7 @@ review requests to `review`.
 
 `↑` `↓` and `Enter` keep working while you type, so you never have to leave the box to
 reach the row you were looking for. The header counts what survived the filter
-(`22 issues · 3 repos · now · 3 matching`). `Esc` clears the search and leaves the list
+(`22 assigned · 3 repos · now · 3 matching`). `Esc` clears the search and leaves the list
 open; a second `Esc` closes the popup.
 
 The filter is a view over the list and nothing else. The tray count and the tooltip go
@@ -112,7 +112,7 @@ configuration**, which opens the file. Changes take effect on the next run.
 {
   "refreshMinutes": 5,
   "maxItems": 50,
-  "includePullRequests": false,
+  "includePullRequests": true,
   "includeReviewRequests": true,
   "showLabels": true,
   "hotkey": "Ctrl+Win+I",
