@@ -112,7 +112,7 @@ configuration**, which opens the file. Changes take effect on the next run.
 {
   "refreshMinutes": 5,
   "maxItems": 50,
-  "includePullRequests": false,
+  "includePullRequests": true,
   "includeReviewRequests": true,
   "showLabels": true,
   "hotkey": "Ctrl+Win+I",

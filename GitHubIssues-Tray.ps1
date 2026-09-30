@@ -171,7 +171,7 @@ if (-not $AllowMultipleInstances) {
 $DefaultConfig = [ordered]@{
     refreshMinutes        = 5
     maxItems              = 50
-    includePullRequests   = $false
+    includePullRequests   = $true
     includeReviewRequests = $true
     showLabels            = $true
     hotkey                = 'Ctrl+Win+I'
