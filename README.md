@@ -3,17 +3,18 @@
 The GitHub issues assigned to you, counted in the Windows tray.
 
 A Windows port of the [omarchy-issues](https://ericksasse.com/omarchy-issues/) plugin:
-the tray icon shows how many open issues are assigned to you, one click opens the
-list, and clicking an item opens the issue in your browser.
+the tray icon shows how many open issues are assigned to you — plus the pull requests
+waiting on your review — one click opens the list, and clicking an item opens it in
+your browser.
 
 ![the popup list](docs/popup.png)
 
 ## How it works
 
 - **No token of its own.** Authentication is delegated to the
-  [GitHub CLI](https://cli.github.com/): the app runs `gh search issues --assignee @me`
-  and `gh search prs --assignee @me` with the credentials already in `gh auth status`.
-  Nothing is stored here.
+  [GitHub CLI](https://cli.github.com/): the app runs `gh search issues --assignee @me`,
+  `gh search prs --assignee @me` and `gh search prs --review-requested @me` with the
+  credentials already in `gh auth status`. Nothing is stored here.
 - **No server in between.** It talks straight to the GitHub API, through `gh`.
 - **Plain PowerShell + WinForms.** No dependencies: no Node, no Electron, no npm.
   About 700 lines of PowerShell and the `gh` CLI.
@@ -51,7 +52,7 @@ To uninstall: `powershell -ExecutionPolicy Bypass -File .\Install-Autostart.ps1 
 | Action | Result |
 |---|---|
 | Left click | open/close the list |
-| Middle click | open the most recently updated issue |
+| Middle click | open the most recently updated item |
 | Right click | menu (refresh, include PRs, sign in, configuration, quit) |
 | `Ctrl+Win+I` | open/close the list from anywhere |
 
@@ -73,13 +74,24 @@ Each row shows a colour bar for the repository (derived from its name, so it is 
 across runs), `owner/repo #number`, the title, the labels in their real GitHub colours,
 and how long ago the issue was updated.
 
+**Review requests**
+
+Open pull requests that ask for your review — directly or through a team you are on,
+the same set as github.com/pulls/review-requested — are in the list and in the tray
+count, marked with an amber `Review` chip (grey `Draft review` while the PR is still a
+draft, like every draft chip). They are not behind `P`: a PR waiting on
+you is work waiting on you. One drops out on its own once you submit your review. A PR
+that is assigned to you and also asks for your review is listed once, as a review.
+The header and the tooltip count the two apart (`5 issues, 2 to review · 4 repos`).
+
 **Search**
 
 `/` or `Ctrl+F` opens a bar under the header and the list narrows as you type. A term
 matches anywhere in the title, the repository, the number or a label name, case
 insensitive, so `4814`, `#4814`, `monde/api` and `bug` all work. Several terms are
 ANDed and their order does not matter: `web mig` keeps only the rows that match both.
-Open pull requests, when they are being shown, also answer to `pr` and `draft`.
+Open pull requests, when they are being shown, also answer to `pr` and `draft`, and
+review requests to `review`.
 
 `↑` `↓` and `Enter` keep working while you type, so you never have to leave the box to
 reach the row you were looking for. The header counts what survived the filter
@@ -101,6 +113,7 @@ configuration**, which opens the file. Changes take effect on the next run.
   "refreshMinutes": 5,
   "maxItems": 50,
   "includePullRequests": false,
+  "includeReviewRequests": true,
   "showLabels": true,
   "hotkey": "Ctrl+Win+I",
   "accentColor": "#00A8FF",
@@ -112,6 +125,9 @@ configuration**, which opens the file. Changes take effect on the next run.
 `P` toggles pull requests instantly, without hitting the API again: both lists are
 always fetched together and the filtering is local. `includePullRequests` only decides
 how the app starts up.
+
+`includeReviewRequests: false` takes review requests out of the list and the count,
+and stops asking GitHub for them.
 
 ### About the global hotkey
 

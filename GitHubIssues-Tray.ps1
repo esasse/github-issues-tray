@@ -169,14 +169,15 @@ if (-not $AllowMultipleInstances) {
 # ---------------------------------------------------------- configuration ---
 
 $DefaultConfig = [ordered]@{
-    refreshMinutes      = 5
-    maxItems            = 50
-    includePullRequests = $false
-    showLabels          = $true
-    hotkey              = 'Ctrl+Win+I'
-    accentColor         = '#00A8FF'
-    popupWidth          = 520
-    popupMaxHeight      = 620
+    refreshMinutes        = 5
+    maxItems              = 50
+    includePullRequests   = $false
+    includeReviewRequests = $true
+    showLabels            = $true
+    hotkey                = 'Ctrl+Win+I'
+    accentColor           = '#00A8FF'
+    popupWidth            = 520
+    popupMaxHeight        = 620
 }
 
 function Read-Config {
@@ -205,6 +206,10 @@ function Read-Config {
 
 $script:Config = Read-Config
 $script:IncludePRs = [bool]$script:Config.includePullRequests
+# Unlike the PRs assigned to you, review requests are not behind P: a PR waiting on
+# your review is work waiting on you, which is what the count is for. The config key
+# exists for whoever wants the tray back to issues only.
+$script:IncludeReviews = [bool]$script:Config.includeReviewRequests
 
 function Get-ConfigColor {
     param([string]$Hex, [string]$Fallback = '#00A8FF')
@@ -225,6 +230,7 @@ $Theme = @{
     Warn      = [System.Drawing.ColorTranslator]::FromHtml('#E5534B')
     Zero      = [System.Drawing.ColorTranslator]::FromHtml('#6E7681')
     Purple    = [System.Drawing.ColorTranslator]::FromHtml('#A371F7')
+    Review    = [System.Drawing.ColorTranslator]::FromHtml('#D29922')
 }
 
 $RepoPalette = @(
@@ -450,10 +456,13 @@ function Test-Loading {
 }
 
 function Get-VisibleItems {
-    $items = @($script:AllItems)
-    if (-not $script:IncludePRs) {
-        $items = @($items | Where-Object { -not $_.isPR })
-    }
+    # A PR can be both assigned to you and waiting on your review; either reason is
+    # enough to show it, so P hiding assigned PRs must not hide that one.
+    $items = @($script:AllItems | Where-Object {
+        (-not $_.isPR) -or
+        ($script:IncludePRs -and $_.isAssigned) -or
+        ($script:IncludeReviews -and $_.isReview)
+    })
     $items = @($items | Sort-Object -Property @{ Expression = { $_.updated } } -Descending)
     if ($items.Count -gt [int]$script:Config.maxItems) {
         $items = @($items[0..([int]$script:Config.maxItems - 1)])
@@ -476,6 +485,7 @@ function Test-ItemMatch {
     if ($Item.isPR) {
         $hay += ' pr'
         if ($Item.isDraft) { $hay += ' draft' }
+        if ($Item.isReview) { $hay += ' review' }
     }
     if ($Item.labels) {
         foreach ($lb in $Item.labels) { $hay += ' ' + $lb.name }
@@ -509,6 +519,7 @@ function Save-Cache {
                 [ordered]@{
                     number = $_.number; title = $_.title; url = $_.url; repo = $_.repo
                     isPR = $_.isPR; isDraft = $_.isDraft
+                    isAssigned = $_.isAssigned; isReview = $_.isReview
                     updated = $_.updated.ToString('o'); created = $_.created.ToString('o')
                     labels = @($_.labels | ForEach-Object { [ordered]@{ name = $_.name; color = $_.color } })
                 }
@@ -523,9 +534,17 @@ function Restore-Cache {
     try {
         $raw = Get-Content -LiteralPath $CachePath -Raw -Encoding UTF8 | ConvertFrom-Json
         $script:AllItems = @($raw.items | ForEach-Object {
+            # A cache written before review requests existed has no isAssigned, and
+            # every item in it came from an assignee query.
+            $assigned = if ($_.PSObject.Properties['isAssigned']) { [bool]$_.isAssigned } else { $true }
+            # A cache written while review requests were on still says isReview after
+            # includeReviewRequests is turned off; left as is, an assigned PR would show
+            # the Review chip and count as "to review" until the first fetch lands.
+            $review = $script:IncludeReviews -and [bool]$_.isReview
             [pscustomobject]@{
                 number = [int]$_.number; title = [string]$_.title; url = [string]$_.url
                 repo = [string]$_.repo; isPR = [bool]$_.isPR; isDraft = [bool]$_.isDraft
+                isAssigned = $assigned; isReview = $review
                 updated = [datetime]$_.updated; created = [datetime]$_.created
                 labels = @($_.labels)
             }
@@ -540,7 +559,7 @@ function Restore-Cache {
 $script:Jobs = @()
 
 function New-GhJob {
-    param([string]$Arguments)
+    param([string]$Kind, [string]$Arguments)
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $script:GhPath
     $psi.Arguments = $Arguments
@@ -553,6 +572,7 @@ function New-GhJob {
 
     $proc = [System.Diagnostics.Process]::Start($psi)
     return [pscustomobject]@{
+        Kind    = $Kind
         Proc    = $proc
         OutTask = $proc.StandardOutput.ReadToEndAsync()
         ErrTask = $proc.StandardError.ReadToEndAsync()
@@ -577,8 +597,14 @@ function Start-Fetch {
         # launch the second gh throws before anything is assigned, and the first child
         # is orphaned with its pipes undrained - Stop-Fetch can only reap what it sees.
         $script:Jobs = @()
-        $script:Jobs += New-GhJob "search issues --assignee @me --state open --sort updated --order desc --limit $limit --json $fields"
-        $script:Jobs += New-GhJob "search prs --assignee @me --state open --sort updated --order desc --limit $limit --json $fields,isDraft"
+        $script:Jobs += New-GhJob 'issue' "search issues --assignee @me --state open --sort updated --order desc --limit $limit --json $fields"
+        $script:Jobs += New-GhJob 'pr' "search prs --assignee @me --state open --sort updated --order desc --limit $limit --json $fields,isDraft"
+        # review-requested also matches requests made to a team you are on, like
+        # github.com/pulls/review-requested does, and a PR drops out on its own once
+        # you submit your review.
+        if ($script:IncludeReviews) {
+            $script:Jobs += New-GhJob 'review' "search prs --review-requested @me --state open --sort updated --order desc --limit $limit --json $fields,isDraft"
+        }
         $script:Fetching = $true
     } catch {
         # Only a failure to LAUNCH gh belongs in here - nothing else runs inside the
@@ -600,15 +626,17 @@ function Start-Fetch {
 }
 
 function Convert-GhItem {
-    param($Raw, [bool]$IsPR)
+    param($Raw, [string]$Kind)
     $repo = if ($Raw.repository -and $Raw.repository.nameWithOwner) { $Raw.repository.nameWithOwner } else { '' }
     return [pscustomobject]@{
         number  = [int]$Raw.number
         title   = [string]$Raw.title
         url     = [string]$Raw.url
         repo    = [string]$repo
-        isPR    = $IsPR
+        isPR    = ($Kind -ne 'issue')
         isDraft = [bool]($Raw.PSObject.Properties['isDraft'] -and $Raw.isDraft)
+        isAssigned = ($Kind -ne 'review')
+        isReview   = ($Kind -eq 'review')
         created = [datetime]$Raw.createdAt
         updated = [datetime]$Raw.updatedAt
         labels  = @($Raw.labels | ForEach-Object { [pscustomobject]@{ name = $_.name; color = $_.color } })
@@ -619,9 +647,7 @@ function Complete-Fetch {
     $errors = @()
     $collected = @()
 
-    for ($i = 0; $i -lt $script:Jobs.Count; $i++) {
-        $job = $script:Jobs[$i]
-        $isPR = ($i -eq 1)
+    foreach ($job in $script:Jobs) {
         $out = $job.OutTask.Result
         $err = $job.ErrTask.Result
         $code = $job.Proc.ExitCode
@@ -635,7 +661,7 @@ function Complete-Fetch {
         if ([string]::IsNullOrWhiteSpace($out)) { continue }
         try {
             $parsed = $out | ConvertFrom-Json
-            foreach ($raw in @($parsed)) { $collected += (Convert-GhItem -Raw $raw -IsPR $isPR) }
+            foreach ($raw in @($parsed)) { $collected += (Convert-GhItem -Raw $raw -Kind $job.Kind) }
         } catch {
             $errors += "invalid response from gh: $(Format-ErrorText $_.Exception.Message)"
         }
@@ -645,8 +671,8 @@ function Complete-Fetch {
     $script:Fetching = $false
 
     if ($errors.Count -gt 0) {
-        # both jobs fail with the same message when the network is down; saying it
-        # twice helps nobody
+        # every job fails with the same message when the network is down; saying it
+        # more than once helps nobody
         $script:LastError = (@($errors | Select-Object -Unique) -join ' | ')
         $script:RetryCount++
         Write-Log "fetch error (attempt $($script:RetryCount)): $($script:LastError)"
@@ -655,7 +681,20 @@ function Complete-Fetch {
         $script:LastError = $null
         $script:RetryCount = 0
         $script:RetryTimer.Stop()
-        $script:AllItems = @($collected)
+        # A PR assigned to you that also asks for your review comes back from both
+        # queries. Listed twice it would count twice in the tray; kept once, it
+        # carries both reasons.
+        $byUrl = [ordered]@{}
+        foreach ($it in $collected) {
+            $seen = $byUrl[$it.url]
+            if ($seen) {
+                $seen.isAssigned = ($seen.isAssigned -or $it.isAssigned)
+                $seen.isReview   = ($seen.isReview -or $it.isReview)
+            } else {
+                $byUrl[$it.url] = $it
+            }
+        }
+        $script:AllItems = @($byUrl.Values)
         $script:LastUpdate = Get-Date
         Save-Cache
         Write-Log "fetch ok: $($script:AllItems.Count) items"
@@ -898,8 +937,14 @@ $List.Add_DrawItem({
     $repoBrush.Dispose()
 
     if ($item.isPR) {
-        $prColor = if ($item.isDraft) { $Theme.Muted } else { $Theme.Purple }
-        $prText = if ($item.isDraft) { 'Draft PR' } else { 'PR' }
+        # A review request trumps the plain PR marker: it is the reason the row is here
+        # (or, for a PR assigned to you as well, the more urgent of the two).
+        $prColor = if ($item.isDraft) { $Theme.Muted } elseif ($item.isReview) { $Theme.Review } else { $Theme.Purple }
+        $prText = if ($item.isReview) {
+            if ($item.isDraft) { 'Draft review' } else { 'Review' }
+        } else {
+            if ($item.isDraft) { 'Draft PR' } else { 'PR' }
+        }
         $prW = [int]$g.MeasureString($prText, $FontChip).Width + (S 10)
         $prRect = New-Object System.Drawing.Rectangle([int]($x + $repoWidth + (S 6)), [int]$y, $prW, $script:ChipH)
         $pen = New-Object System.Drawing.Pen($prColor)
@@ -985,10 +1030,12 @@ function Update-List {
             # Ahead of the two below on purpose: with a filter on, “nothing assigned to
             # you” would be a lie about the list, not just about the search.
             "Nothing matches '$($script:Filter)'.`r`nPress Esc to clear the search."
-        } elseif ($script:IncludePRs) {
-            'Nothing assigned to you. 🎉'
         } else {
-            "No issues assigned to you. 🎉`r`nPress P to include pull requests."
+            $clear = if ($script:IncludePRs) { 'Nothing assigned to you' } else { 'No issues assigned to you' }
+            if ($script:IncludeReviews) { $clear += ', nothing to review' }
+            $clear += '. 🎉'
+            if (-not $script:IncludePRs) { $clear += "`r`nPress P to include pull requests." }
+            $clear
         }
     }
     $Popup.Controls.SetChildIndex($List, 0)
@@ -1058,6 +1105,18 @@ function Set-FooterText {
     }
 }
 
+# “3 issues”, “3 issues, 2 to review”, or just “2 to review” when that is all
+# there is. With P on, the first group mixes issues and assigned PRs, so it is
+# counted as “assigned” rather than given a noun that would be wrong for half of it.
+function Get-CountText {
+    param([int]$Own, [int]$Reviews)
+    $word = if ($script:IncludePRs) { 'assigned' } else { Plural $Own 'issue' 'issues' }
+    if ($Reviews -eq 0) { return "$Own $word" }
+    $rev = "$Reviews to review"
+    if ($Own -eq 0) { return $rev }
+    return "$Own $word, $rev"
+}
+
 function Update-Ui {
     try {
     $items = @(Get-VisibleItems)
@@ -1083,32 +1142,38 @@ function Update-Ui {
     # 63 characters total, so the reason for a failure does not fit here: it always
     # goes to the log, and to the popup when there is nothing left to list.
     $repos = @($items | Select-Object -ExpandProperty repo -Unique).Count
-    $word = if ($script:IncludePRs) { 'open' } else { Plural $count 'issue' 'issues' }
+    $reviews = @($items | Where-Object { $_.isReview }).Count
+    $what = Get-CountText -Own ($count - $reviews) -Reviews $reviews
     if ($loading) {
         $tip = 'GitHub Issues Tray - loading…'
     } elseif ($script:LastError -and $count -eq 0) {
         $tip = 'GitHub Issues Tray - refresh failed'
     } else {
-        $tip = "GitHub: $count $word"
-        if ($repos -gt 0) { $tip += " in $repos " + (Plural $repos 'repo' 'repos') }
+        $inRepos = if ($repos -gt 0) { " in $repos " + (Plural $repos 'repo' 'repos') } else { '' }
         if ($stale) {
             # Has to fit in $TrayTextMax together with the count line above it, or the
             # clamp in Set-TrayTooltip eats exactly the age this line exists to show.
-            $tip += if ($script:LastUpdate) {
+            $when = if ($script:LastUpdate) {
                 "`r`nStale - data from " + (Format-Age $script:LastUpdate)
             } else {
                 "`r`nRefresh failed"
             }
         } elseif ($script:LastUpdate) {
-            $tip += "`r`nUpdated " + (Format-Age $script:LastUpdate)
+            $when = "`r`nUpdated " + (Format-Age $script:LastUpdate)
+        } else {
+            $when = ''
         }
+        $tip = "GitHub: $what$inRepos$when"
+        # "12 issues, 3 to review in 4 repos" with a stale age under it runs past 63.
+        # The repo count is the part the header repeats, so it gives way first.
+        if ($tip.Length -gt $TrayTextMax) { $tip = "GitHub: $what$when" }
     }
     Set-TrayTooltip $tip
 
     if ($loading) {
         $headerText = 'loading…'
     } else {
-        $headerText = "$count $word"
+        $headerText = $what
         if ($repos -gt 0) { $headerText += "  ·  $repos " + (Plural $repos 'repo' 'repos') }
         if ($script:Fetching) {
             $headerText += '  ·  refreshing…'
