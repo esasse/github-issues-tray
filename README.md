@@ -167,7 +167,7 @@ laptop waking up with the network a few seconds behind it.
 
 ## Implementation notes
 
-Six things that are not obvious and that break if changed carelessly:
+Seven things that are not obvious and that break if changed carelessly:
 
 1. **The `.ps1` must be saved as UTF-8 _with_ BOM.** Without the BOM, Windows
    PowerShell 5.1 reads the file as ANSI (cp1252) and every non-ASCII literal — the
@@ -183,7 +183,7 @@ Six things that are not obvious and that break if changed carelessly:
 4. **The process declares DPI awareness (Per-Monitor V2) before creating any window.**
    Without it, on a display scaled above 100% Windows stretches the window as a bitmap
    and the font comes out blurry. In exchange, WinForms stops scaling on its own: fonts
-   are declared in points and GDI+ converts them by the device DPI, but **every pixel
+   are declared in points and GDI converts them by the device DPI, but **every pixel
    measurement in the layout goes through `S()`**, and line heights come from
    `Font.GetHeight()` measured at the current DPI — a fixed constant makes the text
    overlap at 150%. When the popup opens on a monitor with a different scale,
@@ -208,8 +208,16 @@ Six things that are not obvious and that break if changed carelessly:
    the search header read “` matching`” whenever a filter came down to one row.
    Returning `,$items` instead is not the fix it looks like: `@()` around such a
    return nests the array one level deeper, which is the same bug wearing a hat.
+7. **Text goes through GDI, not GDI+.** GDI+ (`Graphics.DrawString`) renders
+   ClearType with thin, uneven stems, colour fringes and irregular letter spacing,
+   worst of all light text on a dark background, and it looked jagged next to the
+   rest of Windows. The rows are drawn with `TextRenderer`, and the labels only
+   follow because `Application.SetCompatibleTextRenderingDefault($false)` runs
+   before the first window exists; without it every `Label` quietly goes back to
+   GDI+. The tray icon is the exception: it is drawn onto a transparent bitmap,
+   and GDI does not blend alpha.
 
-Fetching does not block the UI: `gh` runs in two child processes whose output is
+Fetching does not block the UI: `gh` runs in one child process per query, whose output is
 drained by `ReadToEndAsync()` (avoiding the classic full-pipe deadlock), and a 250 ms
 timer collects the result. Past 60 s the app kills the processes and shows the error
 state.

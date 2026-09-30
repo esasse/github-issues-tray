@@ -126,6 +126,12 @@ public static class TrayNative
 $script:DpiMode = [TrayNative]::EnableDpiAwareness()
 
 [System.Windows.Forms.Application]::EnableVisualStyles()
+# Labels draw with GDI+ unless told otherwise before the first window exists - the
+# call every Visual Studio template makes and a script has to make by hand. Left
+# on GDI+, the header, footer and empty-state text came out thin and unevenly
+# spaced next to the rows, which draw with GDI (see Write-RowText).
+try { [System.Windows.Forms.Application]::SetCompatibleTextRenderingDefault($false) }
+catch { $script:CompatTextError = $_.Exception.Message }
 
 # ------------------------------------------------------------------ paths ---
 
@@ -253,7 +259,7 @@ $FontRepo  = New-Object System.Drawing.Font('Segoe UI Semibold', 8.25, [System.D
 $FontChip  = New-Object System.Drawing.Font('Segoe UI', 7.5, [System.Drawing.FontStyle]::Regular)
 
 # ------------------------------------------------------------------ scale ---
-# Fonts are declared in points and GDI+ already converts them by the device DPI.
+# Fonts are declared in points and GDI and GDI+ already convert them by the device DPI.
 # The layout's pixel measurements are not: they go through S().
 
 $script:Scale = 1.0
@@ -901,13 +907,37 @@ $List.Add_MeasureItem({
     $e.ItemHeight = Get-ItemHeight $List.Items[$e.Index]
 })
 
+# Row text goes through GDI (TextRenderer), not GDI+ (Graphics.DrawString), the
+# same as the labels once SetCompatibleTextRenderingDefault is off: GDI+ ClearType
+# came out jagged, with thin, uneven stems, colour fringes and irregular letter
+# spacing, worst of all light text on a dark background. NoPrefix keeps an
+# "&" in a title from turning into an underline; NoPadding makes measuring and
+# drawing agree to the pixel. NoClipping because a rectangle exactly as wide as
+# the measured text still cuts the last pixel of ink off some glyphs (the "4" in
+# "#1234"). The tray icon stays on GDI+: it is drawn onto a transparent bitmap, and
+# GDI does not blend alpha.
+$RowTextFlags = [System.Windows.Forms.TextFormatFlags]'NoPadding, NoPrefix, SingleLine, NoClipping'
+$RowTextCentred = [System.Windows.Forms.TextFormatFlags]'HorizontalCenter, VerticalCenter'
+
+function Measure-RowText {
+    param($G, [string]$Text, $Font)
+    return [System.Windows.Forms.TextRenderer]::MeasureText($G, $Text, $Font, [System.Drawing.Size]::Empty, $RowTextFlags).Width
+}
+
+function Write-RowText {
+    param($G, [string]$Text, $Font, [System.Drawing.Color]$Color, [System.Drawing.Rectangle]$Rect,
+          [System.Windows.Forms.TextFormatFlags]$Extra = [System.Windows.Forms.TextFormatFlags]::Default)
+    [System.Windows.Forms.TextRenderer]::DrawText($G, $Text, $Font, $Rect, $Color, ($RowTextFlags -bor $Extra))
+}
+
 $List.Add_DrawItem({
     param($sender, $e)
     if ($e.Index -lt 0 -or $e.Index -ge $List.Items.Count) { return }
     $item = $List.Items[$e.Index]
     $g = $e.Graphics
-    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-    $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::ClearTypeGridFit
+    # Everything drawn here is an axis-aligned rectangle. Anti-aliased, the 1px
+    # outline of the PR chip straddled two pixels and came out as a blurred 2px line.
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::None
 
     $selected = ($e.State -band [System.Windows.Forms.DrawItemState]::Selected) -ne 0
     $bg = if ($selected) { $Theme.Sel } else { $Theme.Back }
@@ -926,16 +956,12 @@ $List.Add_DrawItem({
 
     # line 1: age on the right
     $age = Format-Age $item.updated
-    $ageSize = $g.MeasureString($age, $FontMeta)
-    $mutedBrush = New-Object System.Drawing.SolidBrush($Theme.Muted)
-    $g.DrawString($age, $FontMeta, $mutedBrush, [float]($right - $ageSize.Width), [float]$y)
+    Write-RowText $g $age $FontMeta $Theme.Muted (New-Object System.Drawing.Rectangle($x, $y, ($right - $x), $script:LineRepo)) ([System.Windows.Forms.TextFormatFlags]::Right)
 
     # line 1: repo #number (+ PR marker)
-    $repoBrush = New-Object System.Drawing.SolidBrush($repoColor)
     $repoText = "$($item.repo) #$($item.number)"
-    $g.DrawString($repoText, $FontRepo, $repoBrush, [float]$x, [float]$y)
-    $repoWidth = $g.MeasureString($repoText, $FontRepo).Width
-    $repoBrush.Dispose()
+    $repoWidth = Measure-RowText $g $repoText $FontRepo
+    Write-RowText $g $repoText $FontRepo $repoColor (New-Object System.Drawing.Rectangle($x, $y, $repoWidth, $script:LineRepo))
 
     if ($item.isPR) {
         # A review request trumps the plain PR marker: it is the reason the row is here
@@ -946,25 +972,20 @@ $List.Add_DrawItem({
         } else {
             if ($item.isDraft) { 'Draft PR' } else { 'PR' }
         }
-        $prW = [int]$g.MeasureString($prText, $FontChip).Width + (S 10)
-        $prRect = New-Object System.Drawing.Rectangle([int]($x + $repoWidth + (S 6)), [int]$y, $prW, $script:ChipH)
+        $prW = (Measure-RowText $g $prText $FontChip) + (S 10)
+        $prRect = New-Object System.Drawing.Rectangle(($x + $repoWidth + (S 6)), $y, $prW, $script:ChipH)
         $pen = New-Object System.Drawing.Pen($prColor)
-        $g.DrawRectangle($pen, $prRect)
+        # DrawRectangle covers Width+1 by Height+1 pixels; shrink by one so the
+        # outline lands on the same box the text is centred in.
+        $g.DrawRectangle($pen, $prRect.X, $prRect.Y, ($prRect.Width - 1), ($prRect.Height - 1))
         $pen.Dispose()
-        $prBrush = New-Object System.Drawing.SolidBrush($prColor)
-        $g.DrawString($prText, $FontChip, $prBrush, [float]($prRect.X + (S 4)), [float]($prRect.Y + (S 2)))
-        $prBrush.Dispose()
+        Write-RowText $g $prText $FontChip $prColor $prRect $RowTextCentred
     }
 
     # line 2: title
     $y += $script:LineRepo
-    $titleBrush = New-Object System.Drawing.SolidBrush($Theme.Fore)
-    $titleRect = New-Object System.Drawing.RectangleF([float]$x, [float]$y, [float]($right - $x), [float]$script:LineTitle)
-    $fmt = New-Object System.Drawing.StringFormat
-    $fmt.Trimming = [System.Drawing.StringTrimming]::EllipsisCharacter
-    $fmt.FormatFlags = [System.Drawing.StringFormatFlags]::NoWrap
-    $g.DrawString($item.title, $FontTitle, $titleBrush, $titleRect, $fmt)
-    $titleBrush.Dispose()
+    $titleRect = New-Object System.Drawing.Rectangle($x, $y, ($right - $x), $script:LineTitle)
+    Write-RowText $g $item.title $FontTitle $Theme.Fore $titleRect ([System.Windows.Forms.TextFormatFlags]::EndEllipsis)
 
     # line 3: labels
     if ($script:Config.showLabels -and $item.labels -and $item.labels.Count -gt 0) {
@@ -975,21 +996,16 @@ $List.Add_DrawItem({
             try { $c = [System.Drawing.ColorTranslator]::FromHtml('#' + $lb.color) }
             catch { $c = $Theme.Muted }
             $text = [string]$lb.name
-            $w = [int]$g.MeasureString($text, $FontChip).Width + (S 12)
+            $w = (Measure-RowText $g $text $FontChip) + (S 12)
             if (($chipX + $w) -gt $right) { break }
-            $chipRect = New-Object System.Drawing.Rectangle([int]$chipX, [int]$y, $w, $script:ChipH)
+            $chipRect = New-Object System.Drawing.Rectangle($chipX, $y, $w, $script:ChipH)
             $chipBrush = New-Object System.Drawing.SolidBrush($c)
             $g.FillRectangle($chipBrush, $chipRect)
             $chipBrush.Dispose()
-            $fgBrush = New-Object System.Drawing.SolidBrush((Get-ContrastColor $c))
-            $g.DrawString($text, $FontChip, $fgBrush, [float]($chipRect.X + (S 6)), [float]($chipRect.Y + (S 2)))
-            $fgBrush.Dispose()
+            Write-RowText $g $text $FontChip (Get-ContrastColor $c) $chipRect $RowTextCentred
             $chipX += $w + (S 5)
         }
     }
-
-    $mutedBrush.Dispose()
-    $fmt.Dispose()
 })
 
 # ---- list assembly
@@ -1614,6 +1630,7 @@ if (-not $script:GhPath) {
 
 Apply-Scale
 Write-Log "dpi: $($script:DpiMode), scale $($script:Scale)"
+if ($script:CompatTextError) { Write-Log "labels stay on GDI+ text: $(Format-ErrorText $script:CompatTextError)" }
 
 Restore-Cache
 Update-Ui
