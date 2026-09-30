@@ -2,8 +2,9 @@
 <#
     GitHub Issues Tray
     ------------------
-    Shows how many GitHub issues are assigned to you, in the Windows tray.
-    Left click opens the list; clicking an item opens the issue in the browser.
+    Shows how many GitHub issues and pull requests are assigned to you, plus the
+    pull requests waiting on your review, in the Windows tray.
+    Left click opens the list; clicking an item opens it in the browser.
 
     Authentication is delegated to the GitHub CLI (gh). No token is stored by this app.
 
