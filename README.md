@@ -68,7 +68,7 @@ To uninstall: `powershell -ExecutionPolicy Bypass -File .\Install-Autostart.ps1 
 | `R` | refresh now |
 | `G` | open github.com/issues/assigned |
 | `L` | run `gh auth login` |
-| `Esc` | clear the search, or close |
+| `Esc` | clear the search or the header filter, or close |
 
 Each row shows a colour bar for the repository (derived from its name, so it is stable
 across runs), `owner/repo #number`, the title, the labels in their real GitHub colours,
@@ -83,6 +83,10 @@ draft, like every draft chip). They are not behind `P`: a PR waiting on
 you is work waiting on you. One drops out on its own once you submit your review. A PR
 that is assigned to you and also asks for your review is listed once, as a review.
 The header and the tooltip count the two apart (`5 issues, 2 to review · 4 repos`).
+
+Click either count in the header to list only that group; the active one is underlined.
+Click it again, or press `Esc`, to show everything. Like the search, it narrows the list
+and nothing else, and it is forgotten when the popup closes.
 
 **Search**
 

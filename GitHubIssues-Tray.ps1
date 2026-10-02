@@ -453,6 +453,10 @@ $script:SearchOpen    = $false
 $script:MatchCount    = 0
 $script:SuspendSearch = $false   # set while the box is cleared in code
 $script:HeaderBase    = ''       # header without the “N matching” suffix
+# Clicking “N assigned” or “N to review” in the header narrows the list to that
+# group; same scope as the search filter - the list only, never the counts.
+$script:KindFilter     = ''      # '' | 'own' | 'review'
+$script:HeaderSegments = @()     # clickable parts of HeaderBase: @{ Kind; Start; Text }
 
 # "Nothing yet" is not the same as "zero". Until the first query comes back the
 # count is unknown, and showing 0 claims an inbox is clear when it may not be.
@@ -512,6 +516,9 @@ function Test-ItemMatch {
 # Same contract as Get-VisibleItems: wrap the result in @().
 function Get-FilteredItems {
     $items = @(Get-VisibleItems)
+    # Same split as the header counts: a PR both assigned and asking for review is “to review”.
+    if ($script:KindFilter -eq 'review') { $items = @($items | Where-Object { $_.isReview }) }
+    elseif ($script:KindFilter -eq 'own') { $items = @($items | Where-Object { -not $_.isReview }) }
     if ([string]::IsNullOrWhiteSpace($script:Filter)) { return $items }
     $terms = @($script:Filter.ToLowerInvariant() -split '\s+' | Where-Object { $_ })
     if ($terms.Count -eq 0) { return $items }
@@ -1109,7 +1116,59 @@ function Set-HeaderText {
     $text = $script:HeaderBase
     if ($script:Filter) { $text += '  ·  ' + $script:MatchCount + ' matching' }
     $HeaderTitle.Text = $text
+    $HeaderTitle.Invalidate()
 }
+
+# Pixel span of a header segment, measured the way the label draws it (GDI). The
+# end is measured with the prefix so kerning and trailing spaces cannot drift it.
+function Get-HeaderSegmentSpan {
+    param($Seg)
+    $flags = $RowTextFlags
+    $font = $HeaderTitle.Font
+    $left = $HeaderTitle.Padding.Left + (S 2)   # ponytail: Label's internal GDI pad, approximated
+    $end = [System.Windows.Forms.TextRenderer]::MeasureText($script:HeaderBase.Substring(0, $Seg.Start + $Seg.Text.Length), $font, [System.Drawing.Size]::Empty, $flags).Width
+    $len = [System.Windows.Forms.TextRenderer]::MeasureText($Seg.Text, $font, [System.Drawing.Size]::Empty, $flags).Width
+    return @{ X0 = $left + $end - $len; X1 = $left + $end }
+}
+
+function Get-HeaderSegmentAt {
+    param([int]$X)
+    # “link copied: #12” replaces the header for a moment; nothing to hit then.
+    if (-not $script:HeaderBase -or -not $HeaderTitle.Text.StartsWith($script:HeaderBase)) { return $null }
+    foreach ($seg in $script:HeaderSegments) {
+        $span = Get-HeaderSegmentSpan $seg
+        if ($X -ge $span.X0 -and $X -le $span.X1) { return $seg }
+    }
+    return $null
+}
+
+$HeaderTitle.Add_MouseMove({
+    param($sender, $e)
+    $HeaderTitle.Cursor = if (Get-HeaderSegmentAt $e.X) { [System.Windows.Forms.Cursors]::Hand } else { [System.Windows.Forms.Cursors]::Default }
+})
+
+$HeaderTitle.Add_MouseClick({
+    param($sender, $e)
+    if ($e.Button -ne [System.Windows.Forms.MouseButtons]::Left) { return }
+    $seg = Get-HeaderSegmentAt $e.X
+    if (-not $seg) { return }
+    $script:KindFilter = if ($script:KindFilter -eq $seg.Kind) { '' } else { $seg.Kind }
+    Update-List
+    $List.Focus() | Out-Null
+})
+
+# The active group is underlined in the accent colour.
+$HeaderTitle.Add_Paint({
+    param($sender, $e)
+    if (-not $script:KindFilter -or -not $HeaderTitle.Text.StartsWith($script:HeaderBase)) { return }
+    $seg = $script:HeaderSegments | Where-Object { $_.Kind -eq $script:KindFilter } | Select-Object -First 1
+    if (-not $seg) { return }
+    $span = Get-HeaderSegmentSpan $seg
+    $y = [int](($HeaderTitle.Height + $HeaderTitle.Font.Height) / 2) + 1
+    $pen = New-Object System.Drawing.Pen($Theme.Accent, [float](S 2))
+    $e.Graphics.DrawLine($pen, $span.X0, $y, $span.X1, $y)
+    $pen.Dispose()
+})
 
 function Set-FooterText {
     if ($script:SearchOpen) {
@@ -1186,6 +1245,21 @@ function Update-Ui {
         if ($tip.Length -gt $TrayTextMax) { $tip = "GitHub: $what$when" }
     }
     Set-TrayTooltip $tip
+
+    # Mirrors Get-CountText: own group first, then “, ”, then the review group.
+    $own = $count - $reviews
+    $ownText = Get-CountText -Own $own -Reviews 0
+    $segs = @()
+    if (-not $loading) {
+        if ($own -gt 0) { $segs += @{ Kind = 'own'; Start = 0; Text = $ownText } }
+        if ($reviews -gt 0) {
+            $start = if ($own -gt 0) { $ownText.Length + 2 } else { 0 }
+            $segs += @{ Kind = 'review'; Start = $start; Text = "$reviews to review" }
+        }
+    }
+    $script:HeaderSegments = $segs
+    # A refresh can empty the group being filtered on; showing an empty list for it would hide the rest.
+    if ($script:KindFilter -and -not ($segs | Where-Object { $_.Kind -eq $script:KindFilter })) { $script:KindFilter = '' }
 
     if ($loading) {
         $headerText = 'loading…'
@@ -1268,6 +1342,7 @@ function Hide-Popup {
     if ($Popup.Visible) {
         $script:LastHideTicks = [Environment]::TickCount
         $Popup.Hide()
+        $script:KindFilter = ''
         # A filter belongs to this visit to the list, not the next one: left set, the
         # popup would reopen showing a subset with no visible reason why. Hidden first,
         # so the rebuild Hide-Search triggers does not flash a resize on the way out.
@@ -1402,7 +1477,9 @@ $Popup.Add_KeyDown({
     switch ($e.KeyCode) {
         ([System.Windows.Forms.Keys]::Escape) {
             # Esc backs out one step at a time: the filter first, the popup after.
-            if ($script:SearchOpen) { Hide-Search } else { Hide-Popup }
+            if ($script:SearchOpen) { Hide-Search }
+            elseif ($script:KindFilter) { $script:KindFilter = ''; Update-List }
+            else { Hide-Popup }
             $e.Handled = $true
         }
         ([System.Windows.Forms.Keys]::Enter)  { Open-Selected; $e.Handled = $true; $e.SuppressKeyPress = $true }
