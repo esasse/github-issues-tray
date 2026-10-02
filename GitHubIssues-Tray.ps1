@@ -749,12 +749,13 @@ $Header.Dock = [System.Windows.Forms.DockStyle]::Top
 $Header.Height = S 44
 $Header.BackColor = $Theme.BackAlt
 
-$HeaderTitle = New-Object System.Windows.Forms.Label
-$HeaderTitle.AutoSize = $false
+# A Panel, not a Label: the counts in it are click targets, and a Label pads and
+# wraps its text by rules of its own that the hit test would have to guess at. The
+# text is drawn in the header's Paint handler, with the flags it is measured with.
+$HeaderTitle = New-Object System.Windows.Forms.Panel
 $HeaderTitle.Dock = [System.Windows.Forms.DockStyle]::Fill
 $HeaderTitle.ForeColor = $Theme.Fore
 $HeaderTitle.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 10)
-$HeaderTitle.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
 $HeaderTitle.Padding = New-Object System.Windows.Forms.Padding((S 14), 0, (S 14), 0)
 $Header.Controls.Add($HeaderTitle)
 
@@ -906,6 +907,7 @@ function Apply-Scale {
     $SearchIcon.Width = S 18
     $SearchHint.Width = S 150
     $HeaderTitle.Padding = New-Object System.Windows.Forms.Padding((S 14), 0, (S 14), 0)
+    $HeaderTitle.Invalidate()
     $FooterLabel.Padding = New-Object System.Windows.Forms.Padding((S 14), 0, (S 14), 0)
 }
 
@@ -1053,7 +1055,14 @@ function Update-List {
         } elseif ($script:Filter) {
             # Ahead of the two below on purpose: with a filter on, “nothing assigned to
             # you” would be a lie about the list, not just about the search.
-            "Nothing matches '$($script:Filter)'.`r`nPress Esc to clear the search."
+            if ($script:KindFilter) {
+                # The group hides results too; blaming the search alone sends Esc
+                # after the wrong one and leaves the matches still out of sight.
+                $group = ($script:HeaderSegments | Where-Object { $_.Kind -eq $script:KindFilter } | Select-Object -First 1).Text
+                "Nothing in '$group' matches '$($script:Filter)'.`r`nClick it again to search everything, or press Esc to clear the search."
+            } else {
+                "Nothing matches '$($script:Filter)'.`r`nPress Esc to clear the search."
+            }
         } else {
             $clear = if ($script:IncludePRs) { 'Nothing assigned to you' } else { 'No issues assigned to you' }
             if ($script:IncludeReviews) { $clear += ', nothing to review' }
@@ -1119,25 +1128,62 @@ function Set-HeaderText {
     $HeaderTitle.Invalidate()
 }
 
-# Pixel span of a header segment, measured the way the label draws it (GDI). The
-# end is measured with the prefix so kerning and trailing spaces cannot drift it.
-function Get-HeaderSegmentSpan {
-    param($Seg)
-    $flags = $RowTextFlags
+# Where each clickable count landed in the last paint: @{ Kind; X0; X1 }. Measured
+# there, with the Graphics the text was drawn on, so the mouse handlers only read it.
+$script:HeaderSpans = @()
+
+$HeaderTitle.Add_Paint({
+    param($sender, $e)
+    $g = $e.Graphics
     $font = $HeaderTitle.Font
-    $left = $HeaderTitle.Padding.Left + (S 2)   # ponytail: Label's internal GDI pad, approximated
-    $end = [System.Windows.Forms.TextRenderer]::MeasureText($script:HeaderBase.Substring(0, $Seg.Start + $Seg.Text.Length), $font, [System.Drawing.Size]::Empty, $flags).Width
-    $len = [System.Windows.Forms.TextRenderer]::MeasureText($Seg.Text, $font, [System.Drawing.Size]::Empty, $flags).Width
-    return @{ X0 = $left + $end - $len; X1 = $left + $end }
-}
+    $text = $HeaderTitle.Text
+    $pad = $HeaderTitle.Padding
+    $rect = New-Object System.Drawing.Rectangle($pad.Left, 0, [Math]::Max(0, $HeaderTitle.ClientSize.Width - $pad.Horizontal), $HeaderTitle.ClientSize.Height)
+    $spans = @()
+    $size = [System.Windows.Forms.TextRenderer]::MeasureText($g, $text, $font, [System.Drawing.Size]::Empty, $RowTextFlags)
+    if ($size.Width -le $rect.Width) {
+        Write-RowText $g $text $font $HeaderTitle.ForeColor $rect ([System.Windows.Forms.TextFormatFlags]::VerticalCenter)
+        # “link copied: #12” replaces the header for a moment; nothing to hit then.
+        # Ordinal, like Test-ItemMatch: “·” and “…” are in this text.
+        if ($script:HeaderBase -and $text.StartsWith($script:HeaderBase, [System.StringComparison]::Ordinal)) {
+            foreach ($seg in $script:HeaderSegments) {
+                # The end is measured with everything before it, so kerning and the
+                # spaces in between cannot drift it.
+                $end = Measure-RowText $g ($text.Substring(0, $seg.Start + $seg.Text.Length)) $font
+                $len = Measure-RowText $g $seg.Text $font
+                $spans += @{ Kind = $seg.Kind; X0 = $rect.X + $end - $len; X1 = $rect.X + $end }
+            }
+        }
+    } else {
+        # Too long for one line: a stale header with every part on, in a narrow popup.
+        # Wrapped, the counts are no longer where a one-line measure puts them, so they
+        # stop being click targets rather than be hit in the wrong place.
+        $wrap = [System.Windows.Forms.TextFormatFlags]'NoPadding, NoPrefix, WordBreak'
+        $h = [System.Windows.Forms.TextRenderer]::MeasureText($g, $text, $font, (New-Object System.Drawing.Size($rect.Width, 0)), $wrap).Height
+        $top = [Math]::Max(0, [int](($rect.Height - $h) / 2))
+        $box = New-Object System.Drawing.Rectangle($rect.X, $top, $rect.Width, ($rect.Height - $top))
+        [System.Windows.Forms.TextRenderer]::DrawText($g, $text, $font, $box, $HeaderTitle.ForeColor, $wrap)
+    }
+    $script:HeaderSpans = $spans
+
+    # The active group is underlined in the accent colour, just under the text.
+    $active = $spans | Where-Object { $_.Kind -eq $script:KindFilter } | Select-Object -First 1
+    if ($active) {
+        $y = [int](($rect.Height + $size.Height) / 2) + 1
+        $pen = New-Object System.Drawing.Pen($Theme.Accent, [float](S 2))
+        $g.DrawLine($pen, $active.X0, $y, $active.X1, $y)
+        $pen.Dispose()
+    }
+})
+
+# A Panel does not repaint on its own for either of these, as a Label does.
+$HeaderTitle.Add_TextChanged({ $HeaderTitle.Invalidate() })
+$HeaderTitle.Add_Resize({ $HeaderTitle.Invalidate() })
 
 function Get-HeaderSegmentAt {
     param([int]$X)
-    # “link copied: #12” replaces the header for a moment; nothing to hit then.
-    if (-not $script:HeaderBase -or -not $HeaderTitle.Text.StartsWith($script:HeaderBase)) { return $null }
-    foreach ($seg in $script:HeaderSegments) {
-        $span = Get-HeaderSegmentSpan $seg
-        if ($X -ge $span.X0 -and $X -le $span.X1) { return $seg }
+    foreach ($span in $script:HeaderSpans) {
+        if ($X -ge $span.X0 -and $X -le $span.X1) { return $span }
     }
     return $null
 }
@@ -1154,20 +1200,9 @@ $HeaderTitle.Add_MouseClick({
     if (-not $seg) { return }
     $script:KindFilter = if ($script:KindFilter -eq $seg.Kind) { '' } else { $seg.Kind }
     Update-List
-    $List.Focus() | Out-Null
-})
-
-# The active group is underlined in the accent colour.
-$HeaderTitle.Add_Paint({
-    param($sender, $e)
-    if (-not $script:KindFilter -or -not $HeaderTitle.Text.StartsWith($script:HeaderBase)) { return }
-    $seg = $script:HeaderSegments | Where-Object { $_.Kind -eq $script:KindFilter } | Select-Object -First 1
-    if (-not $seg) { return }
-    $span = Get-HeaderSegmentSpan $seg
-    $y = [int](($HeaderTitle.Height + $HeaderTitle.Font.Height) / 2) + 1
-    $pen = New-Object System.Drawing.Pen($Theme.Accent, [float](S 2))
-    $e.Graphics.DrawLine($pen, $span.X0, $y, $span.X1, $y)
-    $pen.Dispose()
+    # Back to wherever the typing was. Left on the list, the rest of a search typed
+    # after the click would run as shortcuts: R refreshes, G opens github.com.
+    if ($script:SearchOpen) { $SearchBox.Focus() | Out-Null } else { $List.Focus() | Out-Null }
 })
 
 function Set-FooterText {
@@ -1184,13 +1219,15 @@ function Set-FooterText {
 # “3 issues”, “3 issues, 2 to review”, or just “2 to review” when that is all
 # there is. With P on, the first group mixes issues and assigned PRs, so it is
 # counted as “assigned” rather than given a noun that would be wrong for half of it.
-function Get-CountText {
+# Returned in parts, @{ Kind; Text }, joined by the caller, so the header can tell
+# where each count sits in the text without repeating how it was built.
+function Get-CountParts {
     param([int]$Own, [int]$Reviews)
     $word = if ($script:IncludePRs) { 'assigned' } else { Plural $Own 'issue' 'issues' }
-    if ($Reviews -eq 0) { return "$Own $word" }
-    $rev = "$Reviews to review"
-    if ($Own -eq 0) { return $rev }
-    return "$Own $word, $rev"
+    $parts = @()
+    if ($Own -gt 0 -or $Reviews -eq 0) { $parts += @{ Kind = 'own'; Text = "$Own $word" } }
+    if ($Reviews -gt 0) { $parts += @{ Kind = 'review'; Text = "$Reviews to review" } }
+    return $parts
 }
 
 function Update-Ui {
@@ -1219,7 +1256,9 @@ function Update-Ui {
     # goes to the log, and to the popup when there is nothing left to list.
     $repos = @($items | Select-Object -ExpandProperty repo -Unique).Count
     $reviews = @($items | Where-Object { $_.isReview }).Count
-    $what = Get-CountText -Own ($count - $reviews) -Reviews $reviews
+    $parts = @(Get-CountParts -Own ($count - $reviews) -Reviews $reviews)
+    $sep = ', '
+    $what = ($parts | ForEach-Object { $_.Text }) -join $sep
     if ($loading) {
         $tip = 'GitHub Issues Tray - loading…'
     } elseif ($script:LastError -and $count -eq 0) {
@@ -1246,20 +1285,16 @@ function Update-Ui {
     }
     Set-TrayTooltip $tip
 
-    # Mirrors Get-CountText: own group first, then “, ”, then the review group.
-    $own = $count - $reviews
-    $ownText = Get-CountText -Own $own -Reviews 0
+    # The counts open the header, in the order $what joined them. With one group
+    # there is nothing to narrow: a click would hide nothing and cost an extra Esc.
     $segs = @()
-    if (-not $loading) {
-        if ($own -gt 0) { $segs += @{ Kind = 'own'; Start = 0; Text = $ownText } }
-        if ($reviews -gt 0) {
-            $start = if ($own -gt 0) { $ownText.Length + 2 } else { 0 }
-            $segs += @{ Kind = 'review'; Start = $start; Text = "$reviews to review" }
+    if (-not $loading -and $parts.Count -gt 1) {
+        $start = 0
+        foreach ($p in $parts) {
+            $segs += @{ Kind = $p.Kind; Start = $start; Text = $p.Text }
+            $start += $p.Text.Length + $sep.Length
         }
     }
-    $script:HeaderSegments = $segs
-    # A refresh can empty the group being filtered on; showing an empty list for it would hide the rest.
-    if ($script:KindFilter -and -not ($segs | Where-Object { $_.Kind -eq $script:KindFilter })) { $script:KindFilter = '' }
 
     if ($loading) {
         $headerText = 'loading…'
@@ -1273,7 +1308,13 @@ function Update-Ui {
         }
         if ($stale) { $headerText += '  ·  could not refresh' }
     }
+    # Side by side, with nothing that can throw between them: the segments are
+    # offsets into this text, and one without the other would point past its end.
     $script:HeaderBase = $headerText
+    $script:HeaderSegments = $segs
+    # A refresh can leave the group being filtered on empty, or alone; filtering on it
+    # would then show an empty list or hide nothing.
+    if ($script:KindFilter -and -not ($segs | Where-Object { $_.Kind -eq $script:KindFilter })) { $script:KindFilter = '' }
     Set-HeaderText
     $HeaderTitle.ForeColor = if ($script:LastError) { $Theme.Warn } else { $Theme.Fore }
 
