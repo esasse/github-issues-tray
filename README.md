@@ -84,7 +84,8 @@ you is work waiting on you. One drops out on its own once you submit your review
 that is assigned to you and also asks for your review is listed once, as a review.
 The header and the tooltip count the two apart (`5 issues, 2 to review · 4 repos`).
 
-Click either count in the header to list only that group; the active one is underlined.
+With both groups there, click either count in the header to list only that group; the
+active one is underlined.
 Click it again, or press `Esc`, to show everything. Like the search, it narrows the list
 and nothing else, and it is forgotten when the popup closes.
 
