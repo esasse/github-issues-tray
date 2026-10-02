@@ -1,7 +1,6 @@
 {
   "refreshMinutes": 5,
   "maxItems": 50,
-  "includePullRequests": true,
   "includeReviewRequests": true,
   "showLabels": true,
   "hotkey": "Ctrl+Win+I",

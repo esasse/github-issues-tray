@@ -178,7 +178,6 @@ if (-not $AllowMultipleInstances) {
 $DefaultConfig = [ordered]@{
     refreshMinutes        = 5
     maxItems              = 50
-    includePullRequests   = $true
     includeReviewRequests = $true
     showLabels            = $true
     hotkey                = 'Ctrl+Win+I'
@@ -212,10 +211,9 @@ function Read-Config {
 }
 
 $script:Config = Read-Config
-$script:IncludePRs = [bool]$script:Config.includePullRequests
-# Unlike the PRs assigned to you, review requests are not behind P: a PR waiting on
-# your review is work waiting on you, which is what the count is for. The config key
-# exists for whoever wants the tray back to issues only.
+# Pull requests assigned to you are always shown - they are work assigned to you as
+# much as an issue is. Review requests are too, unless the config turns them off:
+# the key exists for whoever wants the tray back to what is assigned to them.
 $script:IncludeReviews = [bool]$script:Config.includeReviewRequests
 
 function Get-ConfigColor {
@@ -467,12 +465,11 @@ function Test-Loading {
 }
 
 function Get-VisibleItems {
-    # A PR can be both assigned to you and waiting on your review; either reason is
-    # enough to show it, so P hiding assigned PRs must not hide that one.
+    # Issues and assigned PRs always, plus the PRs that ask for your review. Those only
+    # exist with review requests on: they are not fetched otherwise, and Restore-Cache
+    # clears isReview on cached ones.
     $items = @($script:AllItems | Where-Object {
-        (-not $_.isPR) -or
-        ($script:IncludePRs -and $_.isAssigned) -or
-        ($script:IncludeReviews -and $_.isReview)
+        $_.isAssigned -or $_.isReview
     })
     $items = @($items | Sort-Object -Property @{ Expression = { $_.updated } } -Descending)
     if ($items.Count -gt [int]$script:Config.maxItems) {
@@ -1023,7 +1020,7 @@ function Update-List {
     $items = @(Get-FilteredItems)
     $script:MatchCount = $items.Count
     # Keep the highlight on the issue, not on the row number. Every rebuild can move
-    # rows under it - a filter, Esc clearing one, P folding the PRs back in, a refresh
+    # rows under it - a filter, Esc clearing one, a click on a header count, a refresh
     # that re-sorts by updated - and an index kept across that leaves the highlight on
     # a different issue, which is the one Enter then opens.
     $previousUrl = if ($List.SelectedIndex -ge 0) { $List.Items[$List.SelectedIndex].url } else { $null }
@@ -1064,11 +1061,9 @@ function Update-List {
                 "Nothing matches '$($script:Filter)'.`r`nPress Esc to clear the search."
             }
         } else {
-            $clear = if ($script:IncludePRs) { 'Nothing assigned to you' } else { 'No issues assigned to you' }
+            $clear = 'Nothing assigned to you'
             if ($script:IncludeReviews) { $clear += ', nothing to review' }
-            $clear += '. 🎉'
-            if (-not $script:IncludePRs) { $clear += "`r`nPress P to include pull requests." }
-            $clear
+            $clear + '. 🎉'
         }
     }
     $Popup.Controls.SetChildIndex($List, 0)
@@ -1211,21 +1206,19 @@ function Set-FooterText {
         # here would be an invitation to a surprise.
         $FooterLabel.Text = '↑↓ navigate  Enter open  Esc clear search'
     } else {
-        $prState = if ($script:IncludePRs) { 'with PRs' } else { 'no PRs' }
-        $FooterLabel.Text = "↑↓ navigate  Enter open  / search  C copy  P $prState  R refresh  G github  Esc close"
+        $FooterLabel.Text = '↑↓ navigate  Enter open  / search  C copy  R refresh  G github  Esc close'
     }
 }
 
-# “3 issues”, “3 issues, 2 to review”, or just “2 to review” when that is all
-# there is. With P on, the first group mixes issues and assigned PRs, so it is
-# counted as “assigned” rather than given a noun that would be wrong for half of it.
+# “3 assigned”, “3 assigned, 2 to review”, or just “2 to review” when that is all
+# there is. The first group mixes issues and assigned PRs, so it is counted as
+# “assigned” rather than given a noun that would be wrong for half of it.
 # Returned in parts, @{ Kind; Text }, joined by the caller, so the header can tell
 # where each count sits in the text without repeating how it was built.
 function Get-CountParts {
     param([int]$Own, [int]$Reviews)
-    $word = if ($script:IncludePRs) { 'assigned' } else { Plural $Own 'issue' 'issues' }
     $parts = @()
-    if ($Own -gt 0 -or $Reviews -eq 0) { $parts += @{ Kind = 'own'; Text = "$Own $word" } }
+    if ($Own -gt 0 -or $Reviews -eq 0) { $parts += @{ Kind = 'own'; Text = "$Own assigned" } }
     if ($Reviews -gt 0) { $parts += @{ Kind = 'review'; Text = "$Reviews to review" } }
     return $parts
 }
@@ -1279,7 +1272,7 @@ function Update-Ui {
             $when = ''
         }
         $tip = "GitHub: $what$inRepos$when"
-        # "12 issues, 3 to review in 4 repos" with a stale age under it runs past 63.
+        # "12 assigned, 3 to review in 4 repos" with a stale age under it runs past 63.
         # The repo count is the part the header repeats, so it gives way first.
         if ($tip.Length -gt $TrayTextMax) { $tip = "GitHub: $what$when" }
     }
@@ -1319,8 +1312,6 @@ function Update-Ui {
     $HeaderTitle.ForeColor = if ($script:LastError) { $Theme.Warn } else { $Theme.Fore }
 
     Set-FooterText
-
-    $script:MenuIncludePRs.Checked = $script:IncludePRs
 
     if ($Popup.Visible) { Update-List }
     } catch {
@@ -1427,13 +1418,6 @@ function Copy-Selected {
     } catch { Write-Log "failed to copy: $($_.Exception.Message)" }
 }
 
-function Toggle-PullRequests {
-    $script:IncludePRs = -not $script:IncludePRs
-    $List.SelectedIndex = -1
-    Update-Ui
-    if ($Popup.Visible) { Update-List }
-}
-
 function Move-Selection {
     param([int]$Delta)
     if ($List.Items.Count -eq 0) { return }
@@ -1525,7 +1509,6 @@ $Popup.Add_KeyDown({
         }
         ([System.Windows.Forms.Keys]::Enter)  { Open-Selected; $e.Handled = $true; $e.SuppressKeyPress = $true }
         ([System.Windows.Forms.Keys]::C)      { Copy-Selected; $e.Handled = $true }
-        ([System.Windows.Forms.Keys]::P)      { Toggle-PullRequests; $e.Handled = $true }
         ([System.Windows.Forms.Keys]::R)      { $script:RetryCount = 0; Start-Fetch; $e.Handled = $true }
         ([System.Windows.Forms.Keys]::G)      { Open-AssignedPage; $e.Handled = $true }
         ([System.Windows.Forms.Keys]::L)      { Invoke-GhLogin; $e.Handled = $true }
@@ -1571,11 +1554,6 @@ $miRefresh = $Menu.Items.Add('Refresh now')
 $miRefresh.Add_Click({ $script:RetryCount = 0; Start-Fetch })
 
 $Menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator)) | Out-Null
-
-$script:MenuIncludePRs = New-Object System.Windows.Forms.ToolStripMenuItem('Include pull requests')
-$script:MenuIncludePRs.CheckOnClick = $false
-$script:MenuIncludePRs.Add_Click({ Toggle-PullRequests })
-$Menu.Items.Add($script:MenuIncludePRs) | Out-Null
 
 $miAssigned = $Menu.Items.Add('Open github.com/issues/assigned')
 $miAssigned.Add_Click({ Open-AssignedPage })

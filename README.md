@@ -53,7 +53,7 @@ To uninstall: `powershell -ExecutionPolicy Bypass -File .\Install-Autostart.ps1 
 |---|---|
 | Left click | open/close the list |
 | Middle click | open the most recently updated item |
-| Right click | menu (refresh, include PRs, sign in, configuration, quit) |
+| Right click | menu (refresh, sign in, configuration, quit) |
 | `Ctrl+Win+I` | open/close the list from anywhere |
 
 **Inside the list**
@@ -64,7 +64,6 @@ To uninstall: `powershell -ExecutionPolicy Bypass -File .\Install-Autostart.ps1 
 | `Enter` or left click | open the issue in the browser |
 | `/` or `Ctrl+F` | search |
 | `C` or middle click | copy the link |
-| `P` | include/exclude pull requests |
 | `R` | refresh now |
 | `G` | open github.com/issues/assigned |
 | `L` | run `gh auth login` |
@@ -79,10 +78,9 @@ and how long ago the issue was updated.
 Open pull requests that ask for your review — directly or through a team you are on,
 the same set as github.com/pulls/review-requested — are in the list and in the tray
 count, marked with an amber `Review` chip (grey `Draft review` while the PR is still a
-draft, like every draft chip). They are not behind `P`: a PR waiting on
-you is work waiting on you. One drops out on its own once you submit your review. A PR
+draft, like every draft chip). A PR drops out on its own once you submit your review. A PR
 that is assigned to you and also asks for your review is listed once, as a review.
-The header and the tooltip count the two apart (`5 issues, 2 to review · 4 repos`).
+The header and the tooltip count the two apart (`5 assigned, 2 to review · 4 repos`).
 
 With both groups there, click either count in the header to list only that group; the
 active one is underlined.
@@ -95,8 +93,7 @@ and nothing else, and it is forgotten when the popup closes.
 matches anywhere in the title, the repository, the number or a label name, case
 insensitive, so `4814`, `#4814`, `monde/api` and `bug` all work. Several terms are
 ANDed and their order does not matter: `web mig` keeps only the rows that match both.
-Open pull requests, when they are being shown, also answer to `pr` and `draft`, and
-review requests to `review`.
+Pull requests also answer to `pr` and `draft`, and review requests to `review`.
 
 `↑` `↓` and `Enter` keep working while you type, so you never have to leave the box to
 reach the row you were looking for. The header counts what survived the filter
@@ -117,7 +114,6 @@ configuration**, which opens the file. Changes take effect on the next run.
 {
   "refreshMinutes": 5,
   "maxItems": 50,
-  "includePullRequests": true,
   "includeReviewRequests": true,
   "showLabels": true,
   "hotkey": "Ctrl+Win+I",
@@ -126,10 +122,6 @@ configuration**, which opens the file. Changes take effect on the next run.
   "popupMaxHeight": 620
 }
 ```
-
-`P` toggles pull requests instantly, without hitting the API again: both lists are
-always fetched together and the filtering is local. `includePullRequests` only decides
-how the app starts up.
 
 `includeReviewRequests: false` takes review requests out of the list and the count,
 and stops asking GitHub for them.
