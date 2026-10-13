@@ -164,7 +164,7 @@ laptop waking up with the network a few seconds behind it.
 
 ## Implementation notes
 
-Seven things that are not obvious and that break if changed carelessly:
+Eight things that are not obvious and that break if changed carelessly:
 
 1. **The `.ps1` must be saved as UTF-8 _with_ BOM.** Without the BOM, Windows
    PowerShell 5.1 reads the file as ANSI (cp1252) and every non-ASCII literal — the
@@ -213,6 +213,13 @@ Seven things that are not obvious and that break if changed carelessly:
    before the first window exists; without it every `Label` quietly goes back to
    GDI+. The tray icon is the exception: it is drawn onto a transparent bitmap,
    and GDI does not blend alpha.
+8. **`gh` runs with `GH_TELEMETRY=0`.** Since gh 2.92, a command sometimes hands its
+   telemetry to a detached `gh` child, and that child runs `tzutil.exe`. Detached means
+   no console to inherit, so `tzutil` gets one of its own — and with Windows Terminal
+   as the default terminal that is a window flashing on screen for a split second,
+   every so often, with nothing on it to tell where it came from. `CreateNoWindow` on
+   our side does not reach that grandchild; turning telemetry off for the processes
+   the app starts is what removes it.
 
 Fetching does not block the UI: `gh` runs in one child process per query, whose output is
 drained by `ReadToEndAsync()` (avoiding the classic full-pipe deadlock), and a 250 ms

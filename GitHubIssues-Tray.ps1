@@ -1717,6 +1717,12 @@ function Register-Hotkey {
 
 # ------------------------------------------------------------------ start ---
 
+# gh flushes telemetry from a detached gh child that runs tzutil.exe; with no
+# console to inherit, tzutil gets a window of its own and it flashes on screen.
+# Set on this process so every gh it starts inherits it: the fetch jobs and
+# `gh auth login` alike.
+$env:GH_TELEMETRY = '0'
+
 $script:GhPath = (Get-Command gh -ErrorAction SilentlyContinue |
     Select-Object -First 1 -ExpandProperty Source)
 if (-not $script:GhPath) {
