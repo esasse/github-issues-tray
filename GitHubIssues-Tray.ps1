@@ -178,7 +178,6 @@ if (-not $AllowMultipleInstances) {
 $DefaultConfig = [ordered]@{
     refreshMinutes        = 5
     maxItems              = 50
-    includePullRequests   = $true
     includeReviewRequests = $true
     showLabels            = $true
     hotkey                = 'Ctrl+Win+I'
@@ -212,10 +211,9 @@ function Read-Config {
 }
 
 $script:Config = Read-Config
-$script:IncludePRs = [bool]$script:Config.includePullRequests
-# Unlike the PRs assigned to you, review requests are not behind P: a PR waiting on
-# your review is work waiting on you, which is what the count is for. The config key
-# exists for whoever wants the tray back to issues only.
+# Pull requests assigned to you are always shown - they are work assigned to you as
+# much as an issue is. Review requests are too, unless the config turns them off:
+# the key exists for whoever wants the tray back to what is assigned to them.
 $script:IncludeReviews = [bool]$script:Config.includeReviewRequests
 
 function Get-ConfigColor {
@@ -457,6 +455,15 @@ $script:HeaderBase    = ''       # header without the “N matching” suffix
 # group; same scope as the search filter - the list only, never the counts.
 $script:KindFilter     = ''      # '' | 'own' | 'review'
 $script:HeaderSegments = @()     # clickable parts of HeaderBase: @{ Kind; Start; Text }
+# P narrows the list to pull requests, assigned or to review, and I to issues. One
+# switch with three states, not two flags: both on would only ever be an empty list.
+# It is kept apart from KindFilter so it composes with a header group (“assigned”
+# then means the PRs assigned to you) instead of replacing it.
+$script:TypeFilter     = ''      # '' | 'pr' | 'issue'
+$TypeFilters = @{
+    pr    = @{ Key = 'P'; Label = 'PRs only';    One = 'pull request'; Many = 'pull requests'; Other = 'issues' }
+    issue = @{ Key = 'I'; Label = 'Issues only'; One = 'issue';        Many = 'issues';        Other = 'pull requests' }
+}
 
 # "Nothing yet" is not the same as "zero". Until the first query comes back the
 # count is unknown, and showing 0 claims an inbox is clear when it may not be.
@@ -467,12 +474,11 @@ function Test-Loading {
 }
 
 function Get-VisibleItems {
-    # A PR can be both assigned to you and waiting on your review; either reason is
-    # enough to show it, so P hiding assigned PRs must not hide that one.
+    # Issues and assigned PRs always, plus the PRs that ask for your review. Those only
+    # exist with review requests on: they are not fetched otherwise, and Restore-Cache
+    # clears isReview on cached ones.
     $items = @($script:AllItems | Where-Object {
-        (-not $_.isPR) -or
-        ($script:IncludePRs -and $_.isAssigned) -or
-        ($script:IncludeReviews -and $_.isReview)
+        $_.isAssigned -or $_.isReview
     })
     $items = @($items | Sort-Object -Property @{ Expression = { $_.updated } } -Descending)
     if ($items.Count -gt [int]$script:Config.maxItems) {
@@ -519,6 +525,8 @@ function Get-FilteredItems {
     # Same split as the header counts: a PR both assigned and asking for review is “to review”.
     if ($script:KindFilter -eq 'review') { $items = @($items | Where-Object { $_.isReview }) }
     elseif ($script:KindFilter -eq 'own') { $items = @($items | Where-Object { -not $_.isReview }) }
+    if ($script:TypeFilter -eq 'pr') { $items = @($items | Where-Object { $_.isPR }) }
+    elseif ($script:TypeFilter -eq 'issue') { $items = @($items | Where-Object { -not $_.isPR }) }
     if ([string]::IsNullOrWhiteSpace($script:Filter)) { return $items }
     $terms = @($script:Filter.ToLowerInvariant() -split '\s+' | Where-Object { $_ })
     if ($terms.Count -eq 0) { return $items }
@@ -1023,7 +1031,7 @@ function Update-List {
     $items = @(Get-FilteredItems)
     $script:MatchCount = $items.Count
     # Keep the highlight on the issue, not on the row number. Every rebuild can move
-    # rows under it - a filter, Esc clearing one, P folding the PRs back in, a refresh
+    # rows under it - a filter, Esc clearing one, a click on a header count, a refresh
     # that re-sorts by updated - and an index kept across that leaves the highlight on
     # a different issue, which is the one Enter then opens.
     $previousUrl = if ($List.SelectedIndex -ge 0) { $List.Items[$List.SelectedIndex].url } else { $null }
@@ -1052,23 +1060,40 @@ function Update-List {
             $why = Format-ErrorText $script:LastError
             if ($why.Length -gt 160) { $why = $why.Substring(0, 159) + [char]0x2026 }
             "Couldn't reach GitHub.`r`n$why`r`nPress R to try again, or L to sign in."
-        } elseif ($script:Filter) {
-            # Ahead of the two below on purpose: with a filter on, “nothing assigned to
-            # you” would be a lie about the list, not just about the search.
-            if ($script:KindFilter) {
-                # The group hides results too; blaming the search alone sends Esc
-                # after the wrong one and leaves the matches still out of sight.
-                $group = ($script:HeaderSegments | Where-Object { $_.Kind -eq $script:KindFilter } | Select-Object -First 1).Text
-                "Nothing in '$group' matches '$($script:Filter)'.`r`nClick it again to search everything, or press Esc to clear the search."
+        } elseif ($script:Filter -or $script:TypeFilter) {
+            # Ahead of the one below on purpose: with a filter on, “nothing assigned to
+            # you” would be a lie about the list, not just about the search. Every
+            # narrowing that is on gets named - the group and P/I hide results too, and
+            # blaming the search alone sends Esc after the wrong one and leaves the
+            # matches still out of sight.
+            $group = if ($script:KindFilter) {
+                ($script:HeaderSegments | Where-Object { $_.Kind -eq $script:KindFilter } | Select-Object -First 1).Text
+            }
+            $type = if ($script:TypeFilter) { $TypeFilters[$script:TypeFilter] }
+            $noun = if ($type) { "No $($type.One)" } else { 'Nothing' }
+            $where = if ($group) { " in '$group'" } else { '' }
+            if ($script:Filter) {
+                # P/I is offered too: the match may be among the rows it hides, and Esc
+                # alone would clear the search and leave that row still out of sight.
+                $more = if ($type) { "press $($type.Key) to search the $($type.Other) too, " } else { '' }
+                $hint = if ($group) {
+                    # Clicking the group again drops the group, not P/I: say what it widens to.
+                    $to = if ($type) { "all $($type.Many)" } else { 'everything' }
+                    "Click it again to search $to, $($more)or press Esc to clear the search."
+                } elseif ($type) {
+                    "Press $($type.Key) to search the $($type.Other) too, or Esc to clear the search."
+                } else { 'Press Esc to clear the search.' }
+                "$noun$where matches '$($script:Filter)'.`r`n$hint"
+            } elseif ($group) {
+                # Only P/I is on top of the group here: the rest of it is hidden, not gone.
+                "No $($type.Many) in '$group'.`r`nPress $($type.Key) to show its $($type.Other) too."
             } else {
-                "Nothing matches '$($script:Filter)'.`r`nPress Esc to clear the search."
+                "No $($type.Many) here.`r`nPress $($type.Key) to show everything."
             }
         } else {
-            $clear = if ($script:IncludePRs) { 'Nothing assigned to you' } else { 'No issues assigned to you' }
+            $clear = 'Nothing assigned to you'
             if ($script:IncludeReviews) { $clear += ', nothing to review' }
-            $clear += '. 🎉'
-            if (-not $script:IncludePRs) { $clear += "`r`nPress P to include pull requests." }
-            $clear
+            $clear + '. 🎉'
         }
     }
     $Popup.Controls.SetChildIndex($List, 0)
@@ -1123,6 +1148,8 @@ function Resize-Popup {
 # Update-List, without recomputing the rest.
 function Set-HeaderText {
     $text = $script:HeaderBase
+    # After HeaderBase, never inside it: the clickable counts are offsets into it.
+    if ($script:TypeFilter) { $text += '  ·  ' + $TypeFilters[$script:TypeFilter].Label }
     if ($script:Filter) { $text += '  ·  ' + $script:MatchCount + ' matching' }
     $HeaderTitle.Text = $text
     $HeaderTitle.Invalidate()
@@ -1211,21 +1238,19 @@ function Set-FooterText {
         # here would be an invitation to a surprise.
         $FooterLabel.Text = '↑↓ navigate  Enter open  Esc clear search'
     } else {
-        $prState = if ($script:IncludePRs) { 'with PRs' } else { 'no PRs' }
-        $FooterLabel.Text = "↑↓ navigate  Enter open  / search  C copy  P $prState  R refresh  G github  Esc close"
+        $FooterLabel.Text = '↑↓ navigate  Enter open  / search  P PRs  I issues  C copy  R refresh  G github  Esc close'
     }
 }
 
-# “3 issues”, “3 issues, 2 to review”, or just “2 to review” when that is all
-# there is. With P on, the first group mixes issues and assigned PRs, so it is
-# counted as “assigned” rather than given a noun that would be wrong for half of it.
+# “3 assigned”, “3 assigned, 2 to review”, or just “2 to review” when that is all
+# there is. The first group mixes issues and assigned PRs, so it is counted as
+# “assigned” rather than given a noun that would be wrong for half of it.
 # Returned in parts, @{ Kind; Text }, joined by the caller, so the header can tell
 # where each count sits in the text without repeating how it was built.
 function Get-CountParts {
     param([int]$Own, [int]$Reviews)
-    $word = if ($script:IncludePRs) { 'assigned' } else { Plural $Own 'issue' 'issues' }
     $parts = @()
-    if ($Own -gt 0 -or $Reviews -eq 0) { $parts += @{ Kind = 'own'; Text = "$Own $word" } }
+    if ($Own -gt 0 -or $Reviews -eq 0) { $parts += @{ Kind = 'own'; Text = "$Own assigned" } }
     if ($Reviews -gt 0) { $parts += @{ Kind = 'review'; Text = "$Reviews to review" } }
     return $parts
 }
@@ -1279,7 +1304,7 @@ function Update-Ui {
             $when = ''
         }
         $tip = "GitHub: $what$inRepos$when"
-        # "12 issues, 3 to review in 4 repos" with a stale age under it runs past 63.
+        # "12 assigned, 3 to review in 4 repos" with a stale age under it runs past 63.
         # The repo count is the part the header repeats, so it gives way first.
         if ($tip.Length -gt $TrayTextMax) { $tip = "GitHub: $what$when" }
     }
@@ -1319,8 +1344,6 @@ function Update-Ui {
     $HeaderTitle.ForeColor = if ($script:LastError) { $Theme.Warn } else { $Theme.Fore }
 
     Set-FooterText
-
-    $script:MenuIncludePRs.Checked = $script:IncludePRs
 
     if ($Popup.Visible) { Update-List }
     } catch {
@@ -1384,6 +1407,7 @@ function Hide-Popup {
         $script:LastHideTicks = [Environment]::TickCount
         $Popup.Hide()
         $script:KindFilter = ''
+        $script:TypeFilter = ''
         # A filter belongs to this visit to the list, not the next one: left set, the
         # popup would reopen showing a subset with no visible reason why. Hidden first,
         # so the rebuild Hide-Search triggers does not flash a resize on the way out.
@@ -1425,13 +1449,6 @@ function Copy-Selected {
         [System.Windows.Forms.Clipboard]::SetText($item.url)
         $HeaderTitle.Text = "link copied: #$($item.number)"
     } catch { Write-Log "failed to copy: $($_.Exception.Message)" }
-}
-
-function Toggle-PullRequests {
-    $script:IncludePRs = -not $script:IncludePRs
-    $List.SelectedIndex = -1
-    Update-Ui
-    if ($Popup.Visible) { Update-List }
 }
 
 function Move-Selection {
@@ -1520,12 +1537,24 @@ $Popup.Add_KeyDown({
             # Esc backs out one step at a time: the filter first, the popup after.
             if ($script:SearchOpen) { Hide-Search }
             elseif ($script:KindFilter) { $script:KindFilter = ''; Update-List }
+            elseif ($script:TypeFilter) { $script:TypeFilter = ''; Update-List }
             else { Hide-Popup }
             $e.Handled = $true
         }
         ([System.Windows.Forms.Keys]::Enter)  { Open-Selected; $e.Handled = $true; $e.SuppressKeyPress = $true }
+        { $_ -eq [System.Windows.Forms.Keys]::P -or $_ -eq [System.Windows.Forms.Keys]::I } {
+            # Not with Ctrl or Alt: Alt+P would also beep for a missing menu mnemonic. The char
+            # is suppressed so the toggle's rebuild is not followed by the ListBox's
+            # type-ahead moving the highlight on its own. Pressing the other key while
+            # one is on switches straight over rather than stopping at “everything”.
+            if (-not ($e.Control -or $e.Alt)) {
+                $type = if ($e.KeyCode -eq [System.Windows.Forms.Keys]::P) { 'pr' } else { 'issue' }
+                $script:TypeFilter = if ($script:TypeFilter -eq $type) { '' } else { $type }
+                Update-List
+            }
+            $e.Handled = $true; $e.SuppressKeyPress = $true
+        }
         ([System.Windows.Forms.Keys]::C)      { Copy-Selected; $e.Handled = $true }
-        ([System.Windows.Forms.Keys]::P)      { Toggle-PullRequests; $e.Handled = $true }
         ([System.Windows.Forms.Keys]::R)      { $script:RetryCount = 0; Start-Fetch; $e.Handled = $true }
         ([System.Windows.Forms.Keys]::G)      { Open-AssignedPage; $e.Handled = $true }
         ([System.Windows.Forms.Keys]::L)      { Invoke-GhLogin; $e.Handled = $true }
@@ -1571,11 +1600,6 @@ $miRefresh = $Menu.Items.Add('Refresh now')
 $miRefresh.Add_Click({ $script:RetryCount = 0; Start-Fetch })
 
 $Menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator)) | Out-Null
-
-$script:MenuIncludePRs = New-Object System.Windows.Forms.ToolStripMenuItem('Include pull requests')
-$script:MenuIncludePRs.CheckOnClick = $false
-$script:MenuIncludePRs.Add_Click({ Toggle-PullRequests })
-$Menu.Items.Add($script:MenuIncludePRs) | Out-Null
 
 $miAssigned = $Menu.Items.Add('Open github.com/issues/assigned')
 $miAssigned.Add_Click({ Open-AssignedPage })
@@ -1738,6 +1762,12 @@ function Register-Hotkey {
 }
 
 # ------------------------------------------------------------------ start ---
+
+# gh flushes telemetry from a detached gh child that runs tzutil.exe; with no
+# console to inherit, tzutil gets a window of its own and it flashes on screen.
+# Set on this process so every gh it starts inherits it: the fetch jobs and
+# `gh auth login` alike.
+$env:GH_TELEMETRY = '0'
 
 $script:GhPath = (Get-Command gh -ErrorAction SilentlyContinue |
     Select-Object -First 1 -ExpandProperty Source)

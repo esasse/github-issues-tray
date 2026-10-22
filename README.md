@@ -53,7 +53,7 @@ To uninstall: `powershell -ExecutionPolicy Bypass -File .\Install-Autostart.ps1 
 |---|---|
 | Left click | open/close the list |
 | Middle click | open the most recently updated item |
-| Right click | menu (refresh, include PRs, sign in, configuration, quit) |
+| Right click | menu (refresh, sign in, configuration, quit) |
 | `Ctrl+Win+I` | open/close the list from anywhere |
 
 **Inside the list**
@@ -63,12 +63,12 @@ To uninstall: `powershell -ExecutionPolicy Bypass -File .\Install-Autostart.ps1 
 | `↑` `↓` | move |
 | `Enter` or left click | open the issue in the browser |
 | `/` or `Ctrl+F` | search |
+| `P` / `I` | show only pull requests / only issues, or everything again |
 | `C` or middle click | copy the link |
-| `P` | include/exclude pull requests |
 | `R` | refresh now |
 | `G` | open github.com/issues/assigned |
 | `L` | run `gh auth login` |
-| `Esc` | clear the search or the header filter, or close |
+| `Esc` | clear the search, the header filter or `P`/`I`, or close |
 
 Each row shows a colour bar for the repository (derived from its name, so it is stable
 across runs), `owner/repo #number`, the title, the labels in their real GitHub colours,
@@ -79,15 +79,23 @@ and how long ago the issue was updated.
 Open pull requests that ask for your review — directly or through a team you are on,
 the same set as github.com/pulls/review-requested — are in the list and in the tray
 count, marked with an amber `Review` chip (grey `Draft review` while the PR is still a
-draft, like every draft chip). They are not behind `P`: a PR waiting on
-you is work waiting on you. One drops out on its own once you submit your review. A PR
+draft, like every draft chip). A PR drops out on its own once you submit your review. A PR
 that is assigned to you and also asks for your review is listed once, as a review.
-The header and the tooltip count the two apart (`5 issues, 2 to review · 4 repos`).
+The header and the tooltip count the two apart (`5 assigned, 2 to review · 4 repos`).
 
 With both groups there, click either count in the header to list only that group; the
 active one is underlined.
 Click it again, or press `Esc`, to show everything. Like the search, it narrows the list
 and nothing else, and it is forgotten when the popup closes.
+
+`P` lists only pull requests — the assigned ones and the ones to review — and `I` only
+issues; the header says `PRs only` or `Issues only` while one is on. Pressing the other
+key switches straight over. Either combines with the header groups, so `P` plus a click
+on `assigned` leaves the PRs assigned to you (`I` plus `to review` is always empty:
+review requests are all pull requests). Press the same key again to show everything, or
+`Esc` once the search and the header group are cleared; like the groups, it is forgotten
+when the popup closes. Unlike typing `pr` in the search, `P` does not also catch titles
+that happen to contain those letters.
 
 **Search**
 
@@ -95,8 +103,7 @@ and nothing else, and it is forgotten when the popup closes.
 matches anywhere in the title, the repository, the number or a label name, case
 insensitive, so `4814`, `#4814`, `monde/api` and `bug` all work. Several terms are
 ANDed and their order does not matter: `web mig` keeps only the rows that match both.
-Open pull requests, when they are being shown, also answer to `pr` and `draft`, and
-review requests to `review`.
+Pull requests also answer to `pr` and `draft`, and review requests to `review`.
 
 `↑` `↓` and `Enter` keep working while you type, so you never have to leave the box to
 reach the row you were looking for. The header counts what survived the filter
@@ -117,7 +124,6 @@ configuration**, which opens the file. Changes take effect on the next run.
 {
   "refreshMinutes": 5,
   "maxItems": 50,
-  "includePullRequests": true,
   "includeReviewRequests": true,
   "showLabels": true,
   "hotkey": "Ctrl+Win+I",
@@ -126,10 +132,6 @@ configuration**, which opens the file. Changes take effect on the next run.
   "popupMaxHeight": 620
 }
 ```
-
-`P` toggles pull requests instantly, without hitting the API again: both lists are
-always fetched together and the filtering is local. `includePullRequests` only decides
-how the app starts up.
 
 `includeReviewRequests: false` takes review requests out of the list and the count,
 and stops asking GitHub for them.
@@ -172,7 +174,7 @@ laptop waking up with the network a few seconds behind it.
 
 ## Implementation notes
 
-Seven things that are not obvious and that break if changed carelessly:
+Eight things that are not obvious and that break if changed carelessly:
 
 1. **The `.ps1` must be saved as UTF-8 _with_ BOM.** Without the BOM, Windows
    PowerShell 5.1 reads the file as ANSI (cp1252) and every non-ASCII literal — the
@@ -221,6 +223,13 @@ Seven things that are not obvious and that break if changed carelessly:
    before the first window exists; without it every `Label` quietly goes back to
    GDI+. The tray icon is the exception: it is drawn onto a transparent bitmap,
    and GDI does not blend alpha.
+8. **`gh` runs with `GH_TELEMETRY=0`.** Since gh 2.92, a command sometimes hands its
+   telemetry to a detached `gh` child, and that child runs `tzutil.exe`. Detached means
+   no console to inherit, so `tzutil` gets one of its own — and with Windows Terminal
+   as the default terminal that is a window flashing on screen for a split second,
+   every so often, with nothing on it to tell where it came from. `CreateNoWindow` on
+   our side does not reach that grandchild; turning telemetry off for the processes
+   the app starts is what removes it.
 
 Fetching does not block the UI: `gh` runs in one child process per query, whose output is
 drained by `ReadToEndAsync()` (avoiding the classic full-pipe deadlock), and a 250 ms
