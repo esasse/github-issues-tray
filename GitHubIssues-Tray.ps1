@@ -455,6 +455,15 @@ $script:HeaderBase    = ''       # header without the “N matching” suffix
 # group; same scope as the search filter - the list only, never the counts.
 $script:KindFilter     = ''      # '' | 'own' | 'review'
 $script:HeaderSegments = @()     # clickable parts of HeaderBase: @{ Kind; Start; Text }
+# P narrows the list to pull requests, assigned or to review, and I to issues. One
+# switch with three states, not two flags: both on would only ever be an empty list.
+# It is kept apart from KindFilter so it composes with a header group (“assigned”
+# then means the PRs assigned to you) instead of replacing it.
+$script:TypeFilter     = ''      # '' | 'pr' | 'issue'
+$TypeFilters = @{
+    pr    = @{ Key = 'P'; Label = 'PRs only';    One = 'pull request'; Many = 'pull requests'; Other = 'issues' }
+    issue = @{ Key = 'I'; Label = 'Issues only'; One = 'issue';        Many = 'issues';        Other = 'pull requests' }
+}
 
 # "Nothing yet" is not the same as "zero". Until the first query comes back the
 # count is unknown, and showing 0 claims an inbox is clear when it may not be.
@@ -516,6 +525,8 @@ function Get-FilteredItems {
     # Same split as the header counts: a PR both assigned and asking for review is “to review”.
     if ($script:KindFilter -eq 'review') { $items = @($items | Where-Object { $_.isReview }) }
     elseif ($script:KindFilter -eq 'own') { $items = @($items | Where-Object { -not $_.isReview }) }
+    if ($script:TypeFilter -eq 'pr') { $items = @($items | Where-Object { $_.isPR }) }
+    elseif ($script:TypeFilter -eq 'issue') { $items = @($items | Where-Object { -not $_.isPR }) }
     if ([string]::IsNullOrWhiteSpace($script:Filter)) { return $items }
     $terms = @($script:Filter.ToLowerInvariant() -split '\s+' | Where-Object { $_ })
     if ($terms.Count -eq 0) { return $items }
@@ -1049,16 +1060,35 @@ function Update-List {
             $why = Format-ErrorText $script:LastError
             if ($why.Length -gt 160) { $why = $why.Substring(0, 159) + [char]0x2026 }
             "Couldn't reach GitHub.`r`n$why`r`nPress R to try again, or L to sign in."
-        } elseif ($script:Filter) {
-            # Ahead of the two below on purpose: with a filter on, “nothing assigned to
-            # you” would be a lie about the list, not just about the search.
-            if ($script:KindFilter) {
-                # The group hides results too; blaming the search alone sends Esc
-                # after the wrong one and leaves the matches still out of sight.
-                $group = ($script:HeaderSegments | Where-Object { $_.Kind -eq $script:KindFilter } | Select-Object -First 1).Text
-                "Nothing in '$group' matches '$($script:Filter)'.`r`nClick it again to search everything, or press Esc to clear the search."
+        } elseif ($script:Filter -or $script:TypeFilter) {
+            # Ahead of the one below on purpose: with a filter on, “nothing assigned to
+            # you” would be a lie about the list, not just about the search. Every
+            # narrowing that is on gets named - the group and P/I hide results too, and
+            # blaming the search alone sends Esc after the wrong one and leaves the
+            # matches still out of sight.
+            $group = if ($script:KindFilter) {
+                ($script:HeaderSegments | Where-Object { $_.Kind -eq $script:KindFilter } | Select-Object -First 1).Text
+            }
+            $type = if ($script:TypeFilter) { $TypeFilters[$script:TypeFilter] }
+            $noun = if ($type) { "No $($type.One)" } else { 'Nothing' }
+            $where = if ($group) { " in '$group'" } else { '' }
+            if ($script:Filter) {
+                # P/I is offered too: the match may be among the rows it hides, and Esc
+                # alone would clear the search and leave that row still out of sight.
+                $more = if ($type) { "press $($type.Key) to search the $($type.Other) too, " } else { '' }
+                $hint = if ($group) {
+                    # Clicking the group again drops the group, not P/I: say what it widens to.
+                    $to = if ($type) { "all $($type.Many)" } else { 'everything' }
+                    "Click it again to search $to, $($more)or press Esc to clear the search."
+                } elseif ($type) {
+                    "Press $($type.Key) to search the $($type.Other) too, or Esc to clear the search."
+                } else { 'Press Esc to clear the search.' }
+                "$noun$where matches '$($script:Filter)'.`r`n$hint"
+            } elseif ($group) {
+                # Only P/I is on top of the group here: the rest of it is hidden, not gone.
+                "No $($type.Many) in '$group'.`r`nPress $($type.Key) to show its $($type.Other) too."
             } else {
-                "Nothing matches '$($script:Filter)'.`r`nPress Esc to clear the search."
+                "No $($type.Many) here.`r`nPress $($type.Key) to show everything."
             }
         } else {
             $clear = 'Nothing assigned to you'
@@ -1118,6 +1148,8 @@ function Resize-Popup {
 # Update-List, without recomputing the rest.
 function Set-HeaderText {
     $text = $script:HeaderBase
+    # After HeaderBase, never inside it: the clickable counts are offsets into it.
+    if ($script:TypeFilter) { $text += '  ·  ' + $TypeFilters[$script:TypeFilter].Label }
     if ($script:Filter) { $text += '  ·  ' + $script:MatchCount + ' matching' }
     $HeaderTitle.Text = $text
     $HeaderTitle.Invalidate()
@@ -1206,7 +1238,7 @@ function Set-FooterText {
         # here would be an invitation to a surprise.
         $FooterLabel.Text = '↑↓ navigate  Enter open  Esc clear search'
     } else {
-        $FooterLabel.Text = '↑↓ navigate  Enter open  / search  C copy  R refresh  G github  Esc close'
+        $FooterLabel.Text = '↑↓ navigate  Enter open  / search  P PRs  I issues  C copy  R refresh  G github  Esc close'
     }
 }
 
@@ -1375,6 +1407,7 @@ function Hide-Popup {
         $script:LastHideTicks = [Environment]::TickCount
         $Popup.Hide()
         $script:KindFilter = ''
+        $script:TypeFilter = ''
         # A filter belongs to this visit to the list, not the next one: left set, the
         # popup would reopen showing a subset with no visible reason why. Hidden first,
         # so the rebuild Hide-Search triggers does not flash a resize on the way out.
@@ -1504,10 +1537,23 @@ $Popup.Add_KeyDown({
             # Esc backs out one step at a time: the filter first, the popup after.
             if ($script:SearchOpen) { Hide-Search }
             elseif ($script:KindFilter) { $script:KindFilter = ''; Update-List }
+            elseif ($script:TypeFilter) { $script:TypeFilter = ''; Update-List }
             else { Hide-Popup }
             $e.Handled = $true
         }
         ([System.Windows.Forms.Keys]::Enter)  { Open-Selected; $e.Handled = $true; $e.SuppressKeyPress = $true }
+        { $_ -eq [System.Windows.Forms.Keys]::P -or $_ -eq [System.Windows.Forms.Keys]::I } {
+            # Not with Ctrl or Alt: Alt+P would also beep for a missing menu mnemonic. The char
+            # is suppressed so the toggle's rebuild is not followed by the ListBox's
+            # type-ahead moving the highlight on its own. Pressing the other key while
+            # one is on switches straight over rather than stopping at “everything”.
+            if (-not ($e.Control -or $e.Alt)) {
+                $type = if ($e.KeyCode -eq [System.Windows.Forms.Keys]::P) { 'pr' } else { 'issue' }
+                $script:TypeFilter = if ($script:TypeFilter -eq $type) { '' } else { $type }
+                Update-List
+            }
+            $e.Handled = $true; $e.SuppressKeyPress = $true
+        }
         ([System.Windows.Forms.Keys]::C)      { Copy-Selected; $e.Handled = $true }
         ([System.Windows.Forms.Keys]::R)      { $script:RetryCount = 0; Start-Fetch; $e.Handled = $true }
         ([System.Windows.Forms.Keys]::G)      { Open-AssignedPage; $e.Handled = $true }

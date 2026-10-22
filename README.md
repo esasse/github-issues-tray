@@ -63,11 +63,12 @@ To uninstall: `powershell -ExecutionPolicy Bypass -File .\Install-Autostart.ps1 
 | `↑` `↓` | move |
 | `Enter` or left click | open the issue in the browser |
 | `/` or `Ctrl+F` | search |
+| `P` / `I` | show only pull requests / only issues, or everything again |
 | `C` or middle click | copy the link |
 | `R` | refresh now |
 | `G` | open github.com/issues/assigned |
 | `L` | run `gh auth login` |
-| `Esc` | clear the search or the header filter, or close |
+| `Esc` | clear the search, the header filter or `P`/`I`, or close |
 
 Each row shows a colour bar for the repository (derived from its name, so it is stable
 across runs), `owner/repo #number`, the title, the labels in their real GitHub colours,
@@ -86,6 +87,15 @@ With both groups there, click either count in the header to list only that group
 active one is underlined.
 Click it again, or press `Esc`, to show everything. Like the search, it narrows the list
 and nothing else, and it is forgotten when the popup closes.
+
+`P` lists only pull requests — the assigned ones and the ones to review — and `I` only
+issues; the header says `PRs only` or `Issues only` while one is on. Pressing the other
+key switches straight over. Either combines with the header groups, so `P` plus a click
+on `assigned` leaves the PRs assigned to you (`I` plus `to review` is always empty:
+review requests are all pull requests). Press the same key again to show everything, or
+`Esc` once the search and the header group are cleared; like the groups, it is forgotten
+when the popup closes. Unlike typing `pr` in the search, `P` does not also catch titles
+that happen to contain those letters.
 
 **Search**
 
