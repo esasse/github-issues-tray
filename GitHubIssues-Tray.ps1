@@ -139,6 +139,7 @@ $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ConfigPath = Join-Path $ScriptRoot 'config.json'
 $StateDir   = Join-Path $env:LOCALAPPDATA 'github-issues-tray'
 $CachePath  = Join-Path $StateDir 'cache.json'
+$PrefsPath  = Join-Path $StateDir 'prefs.json'
 $LogPath    = Join-Path $StateDir 'tray.log'
 
 if (-not (Test-Path -LiteralPath $StateDir)) {
@@ -464,6 +465,10 @@ $TypeFilters = @{
     pr    = @{ Key = 'P'; Label = 'PRs only';    One = 'pull request'; Many = 'pull requests'; Other = 'issues' }
     issue = @{ Key = 'I'; Label = 'Issues only'; One = 'issue';        Many = 'issues';        Other = 'pull requests' }
 }
+# O flips the list between newest and oldest first. Unlike the filters above it hides
+# nothing, so it is a preference rather than part of one visit to the list: it
+# outlives the popup, and the app too, in prefs.json.
+$script:OldestFirst    = $false
 
 # "Nothing yet" is not the same as "zero". Until the first query comes back the
 # count is unknown, and showing 0 claims an inbox is clear when it may not be.
@@ -527,10 +532,30 @@ function Get-FilteredItems {
     elseif ($script:KindFilter -eq 'own') { $items = @($items | Where-Object { -not $_.isReview }) }
     if ($script:TypeFilter -eq 'pr') { $items = @($items | Where-Object { $_.isPR }) }
     elseif ($script:TypeFilter -eq 'issue') { $items = @($items | Where-Object { -not $_.isPR }) }
-    if ([string]::IsNullOrWhiteSpace($script:Filter)) { return $items }
-    $terms = @($script:Filter.ToLowerInvariant() -split '\s+' | Where-Object { $_ })
-    if ($terms.Count -eq 0) { return $items }
-    return @($items | Where-Object { Test-ItemMatch -Item $_ -Terms $terms })
+    if (-not [string]::IsNullOrWhiteSpace($script:Filter)) {
+        $terms = @($script:Filter.ToLowerInvariant() -split '\s+' | Where-Object { $_ })
+        if ($terms.Count -gt 0) { $items = @($items | Where-Object { Test-ItemMatch -Item $_ -Terms $terms }) }
+    }
+    # Reversed here, not sorted the other way in Get-VisibleItems: by then maxItems has
+    # kept the most recently updated ones, and the order must not change which those
+    # are - nor the item the tray's middle click opens.
+    if ($script:OldestFirst) { [array]::Reverse($items) }
+    return $items
+}
+
+function Restore-Prefs {
+    if (-not (Test-Path -LiteralPath $PrefsPath)) { return }
+    try {
+        $raw = Get-Content -LiteralPath $PrefsPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $script:OldestFirst = ([string]$raw.order -eq 'oldest')
+    } catch { Write-Log "failed to read prefs: $(Format-ErrorText $_.Exception.Message)" }
+}
+
+function Save-Prefs {
+    try {
+        $order = if ($script:OldestFirst) { 'oldest' } else { 'newest' }
+        ([ordered]@{ order = $order } | ConvertTo-Json) | Set-Content -LiteralPath $PrefsPath -Encoding UTF8
+    } catch { Write-Log "failed to write prefs: $(Format-ErrorText $_.Exception.Message)" }
 }
 
 function Save-Cache {
@@ -859,8 +884,8 @@ $SearchBox.Add_TextChanged({
     $SearchHint.Visible = ($SearchBox.Text.Length -eq 0)
     Update-List
     # Narrowing the list invalidates wherever the cursor was. Put it on the first
-    # match - the most recently updated one - rather than on whatever row the old
-    # index now happens to point at.
+    # match - the most recently updated one, or the oldest with O on - rather than on
+    # whatever row the old index now happens to point at.
     if ($List.Items.Count -gt 0) { $List.SelectedIndex = 0 }
 })
 
@@ -1150,7 +1175,20 @@ function Set-HeaderText {
     $text = $script:HeaderBase
     # After HeaderBase, never inside it: the clickable counts are offsets into it.
     if ($script:TypeFilter) { $text += '  ·  ' + $TypeFilters[$script:TypeFilter].Label }
-    if ($script:Filter) { $text += '  ·  ' + $script:MatchCount + ' matching' }
+    $matching = if ($script:Filter) { '  ·  ' + $script:MatchCount + ' matching' } else { '' }
+    if ($script:OldestFirst) {
+        # The one part that gives way when the line is full: the rows already show the
+        # order, and a header that wraps loses its clickable counts. With P/I and a
+        # search on, it was this that pushed the line past the default popup.
+        $withOrder = $text + '  ·  oldest first' + $matching
+        # From the popup's width, not the header's: before the first Show the docked
+        # header may not have been laid out yet, and would report no room at all.
+        $room = $Popup.Width - $Popup.Padding.Horizontal - $HeaderTitle.Padding.Horizontal
+        $need = [System.Windows.Forms.TextRenderer]::MeasureText($withOrder, $HeaderTitle.Font, [System.Drawing.Size]::Empty, $RowTextFlags).Width
+        if ($need -le $room) { $text = $withOrder } else { $text += $matching }
+    } else {
+        $text += $matching
+    }
     $HeaderTitle.Text = $text
     $HeaderTitle.Invalidate()
 }
@@ -1236,9 +1274,11 @@ function Set-FooterText {
     if ($script:SearchOpen) {
         # The letter shortcuts are all typing while the box has focus, so listing them
         # here would be an invitation to a surprise.
-        $FooterLabel.Text = '↑↓ navigate  Enter open  Esc clear search'
+        $FooterLabel.Text = '↑↓ move  Enter open  Esc clear search'
     } else {
-        $FooterLabel.Text = '↑↓ navigate  Enter open  / search  P PRs  I issues  C copy  R refresh  G github  Esc close'
+        # “move”, not “navigate”: with O in it, the longer word left the line at the full
+        # 490px the default popup gives it, one rounding away from wrapping.
+        $FooterLabel.Text = '↑↓ move  Enter open  / search  P PRs  I issues  O order  C copy  R refresh  G github  Esc close'
     }
 }
 
@@ -1497,6 +1537,17 @@ function Hide-Search {
     if ($Popup.Visible) { $List.Focus() | Out-Null }
 }
 
+function Switch-Order {
+    $script:OldestFirst = -not $script:OldestFirst
+    Save-Prefs
+    # Update-List keeps the highlight on its issue, which here would carry it, and the
+    # view, to the far end of the list. After a flip the top is what you want to see:
+    # with nothing selected the rebuild puts the highlight on the first row, and the
+    # view, refilled from scratch, never leaves the top - no scroll there and back.
+    $List.ClearSelected()
+    Update-List
+}
+
 function Open-AssignedPage { Hide-Popup; Open-Url 'https://github.com/issues/assigned' }
 
 function Invoke-GhLogin {
@@ -1552,6 +1603,11 @@ $Popup.Add_KeyDown({
                 $script:TypeFilter = if ($script:TypeFilter -eq $type) { '' } else { $type }
                 Update-List
             }
+            $e.Handled = $true; $e.SuppressKeyPress = $true
+        }
+        ([System.Windows.Forms.Keys]::O) {
+            # Same reasons as P and I: no Ctrl/Alt, and the char kept from the type-ahead.
+            if (-not ($e.Control -or $e.Alt)) { Switch-Order }
             $e.Handled = $true; $e.SuppressKeyPress = $true
         }
         ([System.Windows.Forms.Keys]::C)      { Copy-Selected; $e.Handled = $true }
@@ -1781,6 +1837,7 @@ Write-Log "dpi: $($script:DpiMode), scale $($script:Scale)"
 if ($script:CompatTextError) { Write-Log "labels stay on GDI+ text: $(Format-ErrorText $script:CompatTextError)" }
 
 Restore-Cache
+Restore-Prefs
 Update-Ui
 Register-Hotkey $script:Config.hotkey
 

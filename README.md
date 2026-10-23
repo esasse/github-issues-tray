@@ -64,6 +64,7 @@ To uninstall: `powershell -ExecutionPolicy Bypass -File .\Install-Autostart.ps1 
 | `Enter` or left click | open the issue in the browser |
 | `/` or `Ctrl+F` | search |
 | `P` / `I` | show only pull requests / only issues, or everything again |
+| `O` | switch between newest and oldest first |
 | `C` or middle click | copy the link |
 | `R` | refresh now |
 | `G` | open github.com/issues/assigned |
@@ -73,6 +74,15 @@ To uninstall: `powershell -ExecutionPolicy Bypass -File .\Install-Autostart.ps1 
 Each row shows a colour bar for the repository (derived from its name, so it is stable
 across runs), `owner/repo #number`, the title, the labels in their real GitHub colours,
 and how long ago the issue was updated.
+
+**Order**
+
+The list is sorted by last update, newest first. `O` flips it to oldest first, the
+header says `oldest first` while it is on (unless the line is already full, with `P`/`I`
+and a search on), and pressing `O` again flips it back. Unlike
+the filters below, the order hides nothing, so it is remembered — across popups and
+restarts. It only changes the order: `maxItems` still keeps the most recently updated
+items, and a middle click on the tray icon still opens the newest one.
 
 **Review requests**
 
@@ -149,6 +159,7 @@ program, the app notes it in the log and starts normally, just without the hotke
 |---|---|
 | Configuration | `config.json`, next to the script |
 | Cache of the last query | `%LOCALAPPDATA%\github-issues-tray\cache.json` |
+| List order (`O`) | `%LOCALAPPDATA%\github-issues-tray\prefs.json` |
 | Log | `%LOCALAPPDATA%\github-issues-tray\tray.log` |
 | Startup shortcut | `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup` |
 
