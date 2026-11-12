@@ -16,32 +16,41 @@ item opens it in your browser.
   `gh search prs --assignee @me` and `gh search prs --review-requested @me` with the
   credentials already in `gh auth status`. Nothing is stored here.
 - **No server in between.** It talks straight to the GitHub API, through `gh`.
-- **Plain PowerShell + WinForms.** No dependencies: no Node, no Electron, no npm.
-  About 700 lines of PowerShell and the `gh` CLI.
+- **WinUI 3 + C#.** The list is a Windows 11 flyout (acrylic, rounded corners, light or
+  dark with the system). The tray icon is plain `Shell_NotifyIcon`: WinUI has no tray
+  icon of its own, and going to Win32 directly costs a hundred lines and no dependency.
 - The tray icon is drawn at runtime, with the count inside it. It has five states:
   three dots while the first query is still out, blue with the count, grey with the
   count when a refresh failed but the cached list is still worth showing, grey `0`
   when you are genuinely clear, and red `!` only when there is nothing to show and
   something is wrong.
 
+Up to version 1 this was a PowerShell + WinForms script. The WinUI version reads the
+same configuration, cache and list order, so upgrading keeps all three.
+
 ## Requirements
 
-- Windows 10/11
+- Windows 10 (19041) or 11, x64 or ARM64
 - [GitHub CLI](https://cli.github.com/), signed in — `winget install GitHub.cli` then `gh auth login`
+- [.NET 10 SDK](https://dotnet.microsoft.com/download) to build — `winget install Microsoft.DotNet.SDK.10`.
+  The Windows App SDK is bundled into the output; nothing else to install.
 
 ## Install
 
 ```powershell
 git clone https://github.com/esasse/github-issues-tray.git
 cd github-issues-tray
+powershell -ExecutionPolicy Bypass -File .\build.ps1
 powershell -ExecutionPolicy Bypass -File .\Install-Autostart.ps1
 ```
 
-`Install-Autostart.ps1` only creates a shortcut in your Startup folder
-(`shell:startup`) pointing at `start.vbs` — **no UAC prompt**, no scheduled task, no
-registry writes.
+`build.ps1` publishes the app into `dist\` (stopping a running copy first, since Windows
+locks the files of a running `.exe`). `Install-Autostart.ps1` creates a shortcut in your
+Startup folder — no UAC, no scheduled task — starts the app, and pins its icon to the
+taskbar instead of the `^` overflow menu, where Windows 11 puts every new tray icon.
 
-To run it right away instead of waiting for the next logon, double-click `start.vbs`.
+Coming from the PowerShell version, run the same two commands: the shortcut has the same
+name and now points at the `.exe`, and the old script is stopped if it is running.
 
 To uninstall: `powershell -ExecutionPolicy Bypass -File .\Install-Autostart.ps1 -Remove`
 
@@ -53,8 +62,10 @@ To uninstall: `powershell -ExecutionPolicy Bypass -File .\Install-Autostart.ps1 
 |---|---|
 | Left click | open/close the list |
 | Middle click | open the most recently updated item |
-| Right click | menu (refresh, sign in, configuration, quit) |
+| Right click | menu (refresh, sign in, configuration, log, quit) |
 | `Ctrl+Win+I` | open/close the list from anywhere |
+
+Launching the app again while it runs opens its list instead of a second copy.
 
 **Inside the list**
 
@@ -73,13 +84,12 @@ To uninstall: `powershell -ExecutionPolicy Bypass -File .\Install-Autostart.ps1 
 
 Each row shows a colour bar for the repository (derived from its name, so it is stable
 across runs), `owner/repo #number`, the title, the labels in their real GitHub colours,
-and how long ago the issue was updated.
+and how long ago the issue was updated. Hovering a row shows its link.
 
 **Order**
 
 The list is sorted by last update, newest first. `O` flips it to oldest first, the
-header says `oldest first` while it is on (unless the line is already full, with `P`/`I`
-and a search on), and pressing `O` again flips it back. Unlike
+header says `oldest first` while it is on, and pressing `O` again flips it back. Unlike
 the filters below, the order hides nothing, so it is remembered — across popups and
 restarts. It only changes the order: `maxItems` still keeps the most recently updated
 items, and a middle click on the tray icon still opens the newest one.
@@ -88,7 +98,7 @@ items, and a middle click on the tray icon still opens the newest one.
 
 Open pull requests that ask for your review — directly or through a team you are on,
 the same set as github.com/pulls/review-requested — are in the list and in the tray
-count, marked with an amber `Review` chip (grey `Draft review` while the PR is still a
+count, marked with an amber `Review` chip (`Draft review` while the PR is still a
 draft, like every draft chip). A PR drops out on its own once you submit your review. A PR
 that is assigned to you and also asks for your review is listed once, as a review.
 The header and the tooltip count the two apart (`5 assigned, 2 to review · 4 repos`).
@@ -109,7 +119,7 @@ that happen to contain those letters.
 
 **Search**
 
-`/` or `Ctrl+F` opens a bar under the header and the list narrows as you type. A term
+`/` or `Ctrl+F` opens a box under the header and the list narrows as you type. A term
 matches anywhere in the title, the repository, the number or a label name, case
 insensitive, so `4814`, `#4814`, `monde/api` and `bug` all work. Several terms are
 ANDed and their order does not matter: `web mig` keeps only the rows that match both.
@@ -117,8 +127,8 @@ Pull requests also answer to `pr` and `draft`, and review requests to `review`.
 
 `↑` `↓` and `Enter` keep working while you type, so you never have to leave the box to
 reach the row you were looking for. The header counts what survived the filter
-(`22 assigned · 3 repos · now · 3 matching`). `Esc` clears the search and leaves the list
-open; a second `Esc` closes the popup.
+(`3 matching`). `Esc` clears the search and leaves the list open; a second `Esc` closes
+the popup.
 
 The filter is a view over the list and nothing else. The tray count and the tooltip go
 on answering “how much is assigned to me”, because that is the number the icon exists
@@ -127,8 +137,9 @@ subset would be worse than typing the two letters again.
 
 ## Configuration
 
-`config.json`, created from the defaults on first run. The tray menu has **Edit
-configuration**, which opens the file. Changes take effect on the next run.
+`%LOCALAPPDATA%\github-issues-tray\config.json`, created on first run (from the
+PowerShell version's `config.json` at the repository root, when there is one). *Edit
+configuration* in the tray menu opens it; *Reload configuration* applies it.
 
 ```json
 {
@@ -144,34 +155,41 @@ configuration**, which opens the file. Changes take effect on the next run.
 ```
 
 `includeReviewRequests: false` takes review requests out of the list and the count,
-and stops asking GitHub for them.
+and stops asking GitHub for them. `accentColor` is the tray icon's colour.
+`popupWidth` and `popupMaxHeight` are in DIPs, so they scale with the display.
 
 ### About the global hotkey
 
 The default is `Ctrl+Win+I` rather than the original plugin's `Ctrl+Win+N`, because on
-Windows 11 `Win+Ctrl+N` already belongs to Narrator. Accepted modifiers: `Ctrl`, `Alt`,
-`Shift`, `Win` (or `Super`). If the chosen combination is already taken by another
-program, the app notes it in the log and starts normally, just without the hotkey.
+Windows 11 `Win+Ctrl+N` already belongs to Narrator. It accepts `Ctrl`, `Alt`, `Shift`,
+`Win` (or `Super`) and a letter, digit or `F1`–`F24`; an empty string turns it off. If
+the chosen combination is already taken by another program, the app notes it in the
+log and starts normally, just without the hotkey.
 
 ## Where things live
 
-| What | Where |
-|---|---|
-| Configuration | `config.json`, next to the script |
-| Cache of the last query | `%LOCALAPPDATA%\github-issues-tray\cache.json` |
-| List order (`O`) | `%LOCALAPPDATA%\github-issues-tray\prefs.json` |
-| Log | `%LOCALAPPDATA%\github-issues-tray\tray.log` |
-| Startup shortcut | `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup` |
+`%LOCALAPPDATA%\github-issues-tray\`
 
-The cache exists so the list is already populated the moment the app comes up, before
-the first query finishes.
+| File | Contents |
+|---|---|
+| `config.json` | settings |
+| `cache.json` | the last query — what shows up before the first one finishes |
+| `prefs.json` | the list order (`O`) |
+| `tray.log` | log (rotates at 256 KB) |
+
+The Startup shortcut is in `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`.
+
+For trying things without touching any of that, set `GITHUB_ISSUES_TRAY_HOME` to another
+folder: the app keeps its state there and runs as a separate instance, next to the real
+one. `--offline` never runs `gh` and shows whatever `cache.json` holds, which is how the
+screenshot above is made, from made-up data. `--show` opens the list on start.
 
 ## When a refresh fails
 
 A failed refresh does not throw away what the app already has. The count stays in the
-tray, greyed out instead of blue, the popup header says `could not refresh`, and the
-list keeps showing the last good data with its real age. The red `!` icon is only for
-when there is genuinely nothing to show.
+tray, greyed out instead of blue, the popup says `Could not refresh` with the reason, and
+the list keeps showing the last good data with its real age. The red `!` icon is only
+for when there is genuinely nothing to show.
 
 Before the first query comes back there is no count to show yet, and `0` would be a
 lie, so the icon shows three dots instead. That is the only moment it does: during a
@@ -181,71 +199,46 @@ Failures retry on their own after 20s, 60s, 120s and 300s before falling back to
 normal interval, and the app watches its own clock: if the wall clock jumps by more
 than three minutes, the machine was suspended, so it refreshes immediately instead of
 waiting for the next tick. Between them, those two cover the common case by far — a
-laptop waking up with the network a few seconds behind it.
+laptop waking up with the network a few seconds behind it. A query that takes more
+than 60 seconds is killed and counts as a failure.
 
 ## Implementation notes
 
-Eight things that are not obvious and that break if changed carelessly:
+Things that are not obvious and that break if changed carelessly:
 
-1. **The `.ps1` must be saved as UTF-8 _with_ BOM.** Without the BOM, Windows
-   PowerShell 5.1 reads the file as ANSI (cp1252) and every non-ASCII literal — the
-   `↑↓` in the footer, the `·` separators, the `…`, the 🎉 in the empty state — arrives
-   mangled on screen. An editor that saves without a BOM reintroduces the bug silently.
-2. **It has to be `powershell.exe` (5.1), not `pwsh`.** PowerShell 7 uses
-   `System.Drawing.Common`, which is not in the runtime — `New-Object
-   System.Drawing.Bitmap` fails with `CS1069`. `start.vbs` already invokes the right
-   binary.
-3. **The icon is recreated on every refresh and the old handle has to die.**
-   `Bitmap.GetHicon()` allocates a GDI handle that `Icon.Dispose()` does not release;
-   without the explicit `DestroyIcon` the app leaks handles over the days it stays open.
-4. **The process declares DPI awareness (Per-Monitor V2) before creating any window.**
-   Without it, on a display scaled above 100% Windows stretches the window as a bitmap
-   and the font comes out blurry. In exchange, WinForms stops scaling on its own: fonts
-   are declared in points and GDI converts them by the device DPI, but **every pixel
-   measurement in the layout goes through `S()`**, and line heights come from
-   `Font.GetHeight()` measured at the current DPI — a fixed constant makes the text
-   overlap at 150%. When the popup opens on a monitor with a different scale,
-   `Show-Popup` re-reads the DPI and rebuilds the layout.
-
-5. **`NotifyIcon.Text` is limited to 63 characters, and throws above that.** Not 127,
-   which is the number the .NET source suggests if you skim it —
-   `ArgumentOutOfRangeException: Text length must be less than 64 characters long`.
-   Because the tooltip is set from a timer callback, an over-long one escaped as an
-   unhandled exception and put a modal .NET crash dialog on screen; the caught message
-   then went back into the error text and made the next tooltip longer still. The
-   tooltip is now built to be short by design, clamped in `Set-TrayTooltip`, and the
-   reason for a failure always goes to the log, and to the popup when there is
-   nothing left to list — both have room for it.
-   `Application.ThreadException` is handled too, so no bug in a callback can put a
-   dialog in front of the user again.
-6. **Every call to `Get-VisibleItems` / `Get-FilteredItems` has to be wrapped in
-   `@()`.** PowerShell unrolls an array on the way out of a function, so a single
-   result comes back as a bare object — and `.Count` on one of those is `$null` in
-   5.1, not `1`. Unwrapped, exactly one assigned issue rendered as “` issues`” with no
-   number in front of it and left middle-click-opens-the-newest doing nothing, and
-   the search header read “` matching`” whenever a filter came down to one row.
-   Returning `,$items` instead is not the fix it looks like: `@()` around such a
-   return nests the array one level deeper, which is the same bug wearing a hat.
-7. **Text goes through GDI, not GDI+.** GDI+ (`Graphics.DrawString`) renders
-   ClearType with thin, uneven stems, colour fringes and irregular letter spacing,
-   worst of all light text on a dark background, and it looked jagged next to the
-   rest of Windows. The rows are drawn with `TextRenderer`, and the labels only
-   follow because `Application.SetCompatibleTextRenderingDefault($false)` runs
-   before the first window exists; without it every `Label` quietly goes back to
-   GDI+. The tray icon is the exception: it is drawn onto a transparent bitmap,
-   and GDI does not blend alpha.
-8. **`gh` runs with `GH_TELEMETRY=0`.** Since gh 2.92, a command sometimes hands its
+1. **`dotnet publish` leaves out the app's `.pri` and `.xbf` files** for an unpackaged
+   WinUI app, although the build writes them, and the published `.exe` then dies in
+   `InitializeComponent` with *XAML parsing failed*. A target in the `.csproj` copies
+   them; do not remove it.
+2. **The tray window is a hidden top-level window, not message-only.** Message-only
+   windows do not get broadcasts, and `TaskbarCreated` is how the icon comes back after
+   Explorer restarts.
+3. **The tooltip limit is 127 characters** with `Shell_NotifyIcon`. WinForms'
+   `NotifyIcon`, which the PowerShell version used, throws at 64 — and from a timer
+   callback that became a modal .NET crash dialog. With `NOTIFYICON_VERSION_4` the
+   standard tooltip only shows with `NIF_SHOWTIP`.
+4. **`gh` runs with `GH_TELEMETRY=0`.** Since gh 2.92, a command sometimes hands its
    telemetry to a detached `gh` child, and that child runs `tzutil.exe`. Detached means
    no console to inherit, so `tzutil` gets one of its own — and with Windows Terminal
    as the default terminal that is a window flashing on screen for a split second,
    every so often, with nothing on it to tell where it came from. `CreateNoWindow` on
    our side does not reach that grandchild; turning telemetry off for the processes
    the app starts is what removes it.
+5. **`/` is read as a character, with `handledEventsToo`.** The virtual key behind `/`
+   moves with the keyboard layout (`VK_OEM_2` on US, `VK_ABNT_C1` on the Brazilian
+   ABNT2), so it has to be the character. And with the focus on the list, the `ListView`
+   marks that character handled: without `handledEventsToo` the search did not open,
+   and the letters typed next ran as shortcuts.
+6. **`TextBox.TextChanged` is asynchronous.** It arrives after the code that cleared the
+   box has returned, so a "suppress while I set it" flag is already off by then. The
+   search compares the box with the current filter instead.
+7. **The list is focused through its selected row, not as a whole.** A `ListView` given
+   the focus hands it to its first row, and the selection follows the focus, so the
+   highlight jumped back to the top every time the search closed.
 
-Fetching does not block the UI: `gh` runs in one child process per query, whose output is
-drained by `ReadToEndAsync()` (avoiding the classic full-pipe deadlock), and a 250 ms
-timer collects the result. Past 60 s the app kills the processes and shows the error
-state.
+Fetching does not block the UI: the queries run in parallel child processes, both pipes
+drained asynchronously (a full stderr pipe would otherwise hang a child still writing
+stdout), and the result is applied on the UI thread.
 
 ## License
 

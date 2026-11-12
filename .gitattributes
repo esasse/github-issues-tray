@@ -1,4 +1,4 @@
-# No normalization: GitHubIssues-Tray.ps1 has to arrive byte for byte
-# (UTF-8 WITH BOM). Letting git "fix" the file breaks the non-ASCII characters.
+# No normalization: files arrive byte for byte as they were committed.
 * -text
 *.png binary
+*.ico binary
