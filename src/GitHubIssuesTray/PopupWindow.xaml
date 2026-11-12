@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="IssuesTray.PopupWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:IssuesTray"
+    Title="GitHub Issues">
+
+    <Grid x:Name="Root" Padding="16,12,10,10" RowSpacing="8">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- header: how much is assigned, how fresh it is, and how the list is narrowed -->
+        <Grid Height="52" ColumnSpacing="12" Margin="0,0,6,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <!-- an open issue: a ring with a dot, in the tray icon's colour -->
+            <Grid Width="26" Height="26" VerticalAlignment="Center">
+                <Ellipse x:Name="HeaderRing" StrokeThickness="2.5" />
+                <Ellipse x:Name="HeaderDot" Width="7" Height="7" />
+            </Grid>
+
+            <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <TextBlock Text="GitHub" Style="{StaticResource SubtitleTextBlockStyle}" />
+                    <TextBlock x:Name="ViewText" VerticalAlignment="Bottom" Margin="0,0,0,3"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                </StackPanel>
+                <TextBlock x:Name="MetaText" Style="{StaticResource CaptionTextBlockStyle}"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis" />
+            </StackPanel>
+
+            <Grid Grid.Column="2" Width="36" Height="36" VerticalAlignment="Center">
+                <Button x:Name="RefreshButton" Width="36" Height="36" Padding="0" IsTabStop="False"
+                        Background="Transparent" BorderThickness="0"
+                        ToolTipService.ToolTip="Refresh (R)" Click="Refresh_Click">
+                    <FontIcon Glyph="&#xE72C;" FontSize="14" />
+                </Button>
+                <ProgressRing x:Name="Spinner" Width="18" Height="18" IsActive="False" Visibility="Collapsed" />
+            </Grid>
+        </Grid>
+
+        <TextBlock x:Name="StatusText" Grid.Row="1" Visibility="Collapsed" Margin="0,0,6,0"
+                   Style="{StaticResource CaptionTextBlockStyle}" TextTrimming="CharacterEllipsis"
+                   Foreground="{ThemeResource SystemFillColorCriticalBrush}" />
+
+        <!-- hidden until / or Ctrl+F; it pushes the rows down instead of covering them -->
+        <TextBox x:Name="SearchBox" Grid.Row="2" Visibility="Collapsed" Margin="0,0,6,0"
+                 PlaceholderText="Search title, repo, #number, label" />
+
+        <Grid x:Name="Body" Grid.Row="3">
+            <ListView x:Name="IssuesList" SelectionMode="Single" IsItemClickEnabled="True"
+                      ItemClick="IssuesList_ItemClick">
+                <ListView.ItemContainerStyle>
+                    <Style TargetType="ListViewItem" BasedOn="{StaticResource DefaultListViewItemStyle}">
+                        <Setter Property="Padding" Value="6,0,6,0" />
+                        <Setter Property="MinHeight" Value="0" />
+                        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                    </Style>
+                </ListView.ItemContainerStyle>
+                <ListView.ItemTemplate>
+                    <DataTemplate x:DataType="local:IssueItem">
+                        <Grid Padding="0,8,0,8" ColumnSpacing="10" ToolTipService.ToolTip="{x:Bind Url}">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="4" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+
+                            <!-- the repository's colour: rows from one repo read as a group -->
+                            <Rectangle Width="4" RadiusX="2" RadiusY="2" Margin="0,2,0,2" Fill="{x:Bind RepoBrush}" />
+
+                            <StackPanel Grid.Column="1" Spacing="3">
+                                <Grid ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Orientation="Horizontal" Spacing="6">
+                                        <TextBlock Text="{x:Bind RepoText}" FontSize="12" FontWeight="SemiBold"
+                                                   TextTrimming="CharacterEllipsis"
+                                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                        <Border Visibility="{x:Bind ChipVisibility}" BorderBrush="{x:Bind ChipBrush}"
+                                                BorderThickness="1" CornerRadius="3" Padding="5,0,5,1" VerticalAlignment="Center">
+                                            <TextBlock Text="{x:Bind ChipText}" FontSize="11" Foreground="{x:Bind ChipBrush}" />
+                                        </Border>
+                                    </StackPanel>
+                                    <TextBlock Grid.Column="1" Text="{x:Bind Age, Mode=OneWay}" FontSize="11"
+                                               VerticalAlignment="Center"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                </Grid>
+
+                                <TextBlock Text="{x:Bind Title}" FontSize="14" TextTrimming="CharacterEllipsis" />
+
+                                <ItemsControl ItemsSource="{x:Bind Labels}" Visibility="{x:Bind LabelsVisibility}"
+                                              IsTabStop="False" Margin="0,2,0,0">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <local:ChipPanel Spacing="5" />
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate x:DataType="local:LabelChip">
+                                            <Border Background="{x:Bind Background}" CornerRadius="8" Padding="7,0,7,1">
+                                                <TextBlock Text="{x:Bind Name}" FontSize="11" Foreground="{x:Bind Foreground}" />
+                                            </Border>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </StackPanel>
+                        </Grid>
+                    </DataTemplate>
+                </ListView.ItemTemplate>
+            </ListView>
+
+            <TextBlock x:Name="EmptyText" HorizontalAlignment="Center" VerticalAlignment="Center"
+                       TextAlignment="Center" TextWrapping="Wrap" Margin="12,0,18,0"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" Visibility="Collapsed" />
+        </Grid>
+
+        <TextBlock x:Name="FooterText" Grid.Row="4" Margin="0,0,6,0" FontSize="11" TextTrimming="CharacterEllipsis"
+                   Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+    </Grid>
+</Window>

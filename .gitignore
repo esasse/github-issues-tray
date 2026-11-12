@@ -1,2 +1,8 @@
-# local user configuration (generated from the defaults on first run)
+bin/
+obj/
+dist/
+*.user
+.vs/
+# the PowerShell version's local configuration; the app now keeps it in
+# %LOCALAPPDATA%\github-issues-tray and copies this one over on first run
 config.json
